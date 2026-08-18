@@ -1,52 +1,46 @@
-# MLRweb — ML Workbench
+# MLRweb — GitHub Pages Frontend
 
-**Developed by Dr. Furquan Ahmad**
+Developed by Dr. Furquan Ahmad.
 
-A GitHub-ready Streamlit regression platform using Excel workbooks instead of CSV files.
+This repository provides a GitHub Pages frontend for the MLRweb Streamlit ML application.
 
-## Main workflow
+## Architecture
 
-1. Upload `.xlsx`
-2. Select Excel Sheet Name
-3. Auto Split or Manual Split
-4. Select preprocessing
-5. Select regression models
-6. Set hyperparameters
-7. Run Training
-8. View Results & Analysis
-9. Export Excel results
-10. Generate Colab code
+GitHub Pages:
+- hosts the public `github.io/MLRweb/` address
+- provides the branded frontend
 
-## Excel format
+Streamlit Community Cloud:
+- runs the Python ML backend
+- handles Excel upload
+- reads Excel sheet names
+- trains the regression models
+- displays Results & Analysis
+- provides the Code Generator
 
-For Auto Split:
+## Current backend
 
-- One `.xlsx` workbook
-- Select the required sheet, e.g. `T`
-- Last column = target
-- All preceding columns = predictors
+The frontend currently embeds:
 
-For Manual Split:
+https://jvvkvgduxqwv5h3mea3e2c.streamlit.app/?embed=true
 
-- `train.xlsx` + selected training sheet
-- `test.xlsx` + selected testing sheet
-- Last column in each = target
+If the Streamlit app URL changes, edit the `src` value in `index.html`.
 
-## Run locally
+## GitHub Pages deployment
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+1. Create a GitHub repository named `MLRweb`.
+2. Upload `index.html` and `README.md`.
+3. Open repository Settings.
+4. Select Pages.
+5. Under Build and deployment choose:
+   - Source: Deploy from a branch
+   - Branch: main
+   - Folder: / (root)
+6. Save.
+7. GitHub will provide a URL similar to:
 
-Then open the Streamlit URL shown in the terminal.
+https://YOUR-GITHUB-USERNAME.github.io/MLRweb/
 
-## GitHub
+## Important
 
-Suggested repository structure:
-
-MLRweb/
-├── app.py
-├── requirements.txt
-├── README.md
-└── .gitignore
+The Python ML computation is still performed by Streamlit Community Cloud. GitHub Pages itself does not execute Python/scikit-learn/XGBoost.

@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MLRweb — ML Workbench</title>
+  <meta name="description" content="MLRweb — ML Workbench Regression Platform developed by Dr. Furquan Ahmad">
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; }
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      background: #f5f7fa;
+      overflow: hidden;
+    }
+    .topbar {
+      height: 58px;
+      background: #123f63;
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 18px;
+    }
+    .title {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 18px;
+      font-weight: 700;
+    }
+    .badge {
+      background: #f4a900;
+      color: white;
+      padding: 6px 12px;
+      border-radius: 5px;
+      font-weight: 800;
+      font-size: 15px;
+    }
+    .developer {
+      font-size: 11px;
+      opacity: .95;
+    }
+    .developer strong { color: white; }
+    .nav {
+      height: 44px;
+      background: white;
+      border-bottom: 1px solid #d9e0e7;
+      display: flex;
+      align-items: center;
+      padding-left: 12px;
+      gap: 8px;
+    }
+    .nav-item {
+      height: 44px;
+      display: flex;
+      align-items: center;
+      padding: 0 18px;
+      color: #244762;
+      font-size: 12px;
+      font-weight: 700;
+      border-bottom: 2px solid transparent;
+    }
+    .nav-item.active {
+      border-bottom-color: #123f63;
+      color: #123f63;
+    }
+    .num {
+      background: #edf2f7;
+      border-radius: 4px;
+      padding: 3px 7px;
+      margin-right: 8px;
+      font-size: 10px;
+    }
+    .app-frame {
+      position: absolute;
+      top: 102px;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: white;
+    }
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      display: block;
+      background: white;
+    }
+    .loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: #f5f7fa;
+      z-index: 1;
+      pointer-events: none;
+      animation: hide 1s 4s forwards;
+    }
+    .loading-box {
+      background: white;
+      padding: 24px 34px;
+      border-radius: 10px;
+      box-shadow: 0 4px 20px rgba(0,0,0,.08);
+      text-align: center;
+      color: #123f63;
+    }
+    .spinner {
+      width: 30px;
+      height: 30px;
+      margin: 0 auto 12px;
+      border: 3px solid #dce6ee;
+      border-top-color: #123f63;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes hide { to { opacity: 0; visibility: hidden; } }
+    @media (max-width: 800px) {
+      .developer { display: none; }
+      .title { font-size: 15px; }
+      .nav-item { padding: 0 8px; font-size: 10px; }
+      .app-frame { top: 102px; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="title">
+      <span class="badge">MLRweb</span>
+      <span>ML Workbench — Regression Platform</span>
+    </div>
+    <div class="developer">
+      Developed by <strong>Dr. Furquan Ahmad</strong>
+    </div>
+  </header>
+
+  <nav class="nav">
+    <div class="nav-item active">
+      <span class="num">1</span> WORKBENCH
+    </div>
+    <div class="nav-item">
+      <span class="num">2</span> RESULTS &amp; ANALYSIS
+    </div>
+    <div class="nav-item">
+      <span class="num">3</span> CODE GENERATOR
+    </div>
+  </nav>
+
+  <main class="app-frame">
+    <div class="loading">
+      <div class="loading-box">
+        <div class="spinner"></div>
+        <strong>Loading MLRweb...</strong>
+        <div style="font-size:12px;margin-top:6px;">
+          Developed by Dr. Furquan Ahmad
+        </div>
+      </div>
+    </div>
+
+    <!--
+      This is the Python ML backend.
+      Streamlit Community Cloud supports public iframe embedding
+      using ?embed=true.
+    -->
+    <iframe
+      src="https://jvvkvgduxqwv5h3mea3e2c.streamlit.app/?embed=true"
+      title="MLRweb — ML Workbench"
+      allow="clipboard-read; clipboard-write"
+      loading="eager">
+    </iframe>
+  </main>
+
+</body>
+</html>
