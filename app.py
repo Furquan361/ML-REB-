@@ -444,6 +444,53 @@ def tune_16_base_models(X,y,seed,progress_cb=None):
     return best_specs,pd.DataFrame(rows).sort_values("Validation_R2",ascending=False).reset_index(drop=True)
 
 
+def make_1000_iter_specs(specs):
+    """Apply a 1000-iteration/estimator setting where the estimator supports it,
+    while preserving the selected/tuned hyperparameters. Models without an
+    iterative/estimator-count control retain their best specification."""
+    out={k:dict(v) for k,v in specs.items()}
+    # Iterative solvers
+    for code in ("Lasso","EN","HGBR","MLP"):
+        if code in out:
+            if code in ("Lasso","EN"): out[code]["max_iter"]=1000
+            elif code=="HGBR": out[code]["max_iter"]=1000
+            elif code=="MLP": out[code]["max_iter"]=1000
+    # Ensemble methods: use 1000 estimators as the requested 1000-step run.
+    for code in ("ABR","GBR","RFR","ETR","BGR","XGB"):
+        if code in out and "n_estimators" in out[code]: out[code]["n_estimators"]=1000
+    return out
+
+
+def _iter_setting_label(code):
+    if code in ("Lasso","EN"): return "max_iter=1000"
+    if code in ("HGBR","MLP"): return "max_iter=1000"
+    if code in ("ABR","GBR","RFR","ETR","BGR","XGB"): return "n_estimators=1000"
+    return "N/A (no iteration/estimator control)"
+
+
+def run_16_model_1000_analysis(X_train,y_train,X_test,y_test,specs,seed,progress_cb=None):
+    """Train all 16 base models using the selected best hyperparameters,
+    forcing a 1000-iteration/estimator setting where supported.
+    Returns metrics, combined TR/TS actual-predicted values and specs."""
+    specs1000=make_1000_iter_specs(specs)
+    codes=["LR","Ridge","Lasso","EN","DTR","ABR","GBR","HGBR","RFR","ETR","BGR","SVR","KNN","XGB","MLP","ELM"]
+    rows=[]; pred=[]; used=[]
+    for i,code in enumerate(codes,1):
+        if code=="XGB" and not XGB_AVAILABLE: continue
+        try:
+            model=_make_base_from_spec(code,specs1000[code],seed); model.fit(X_train,y_train)
+            ptr=model.predict(X_train); pte=model.predict(X_test)
+            rows.append(metric_row(code,y_train,ptr,y_test,pte,0.0,{"Iteration_Setting":_iter_setting_label(code),"Hyperparameters_1000":str(specs1000[code])}))
+            for phase,actuals,preds in (("TR",y_train,ptr),("TS",y_test,pte)):
+                for j,(a,b) in enumerate(zip(actuals,preds),1):
+                    pred.append({"Model":code,"Dataset":phase,"Sample":j,"Actual":float(a),"Predicted":float(b),"Residual":float(a-b)})
+            used.append({"Model":code,"Iteration_Setting":_iter_setting_label(code),"Hyperparameters":str(specs1000[code])})
+        except Exception as e:
+            rows.append({"Model":code,"R2_Train":np.nan,"RMSE_Train":np.nan,"MAE_Train":np.nan,"R2_Test":np.nan,"RMSE_Test":np.nan,"MAE_Test":np.nan,"Time_s":np.nan,"Iteration_Setting":_iter_setting_label(code),"Hyperparameters_1000":str(specs1000.get(code,{})),"Error":str(e)})
+        if progress_cb: progress_cb(i/16)
+    return pd.DataFrame(rows),pd.DataFrame(pred),pd.DataFrame(used)
+
+
 def metric_row(name,ytr,ptr,yte,pte,elapsed,extra=None):
     d={"Model":name,"R2_Train":r2_score(ytr,ptr),"RMSE_Train":np.sqrt(mean_squared_error(ytr,ptr)),"MAE_Train":mean_absolute_error(ytr,ptr),"R2_Test":r2_score(yte,pte),"RMSE_Test":np.sqrt(mean_squared_error(yte,pte)),"MAE_Test":mean_absolute_error(yte,pte),"Time_s":elapsed}
     if extra: d.update(extra)
@@ -498,6 +545,7 @@ with tab1:
         mlp_l1=st.number_input("MLP layer1",1,1000,100); mlp_l2=st.number_input("MLP layer2",1,1000,50); mlp_activation=st.selectbox("MLP activation",["relu","tanh","logistic"]); mlp_alpha=st.number_input("MLP alpha",.0000001,10.,.0001,format="%.7f"); mlp_iter=st.number_input("MLP max_iter",100,20000,5000,100); switch("MLP")
         elm_hidden=st.number_input("ELM hidden neurons",5,1000,100,key="base_elm_hidden"); elm_alpha=st.number_input("ELM regularization",1e-10,100.,1e-6,format="%.8f",key="base_elm_alpha"); elm_activation=st.selectbox("ELM activation",["tanh","relu","sigmoid"],key="base_elm_activation"); switch("ELM")
         auto_tune_16=st.checkbox("Auto-tune all 16 base models and report best hyperparameters",value=True)
+        run_1000_16=st.checkbox("Also run all 16 base models at 1000 iterations/estimators",value=True)
         st.markdown("### RESEARCH / ANN–ANFIS MODELS")
         st.caption("All parameters below are editable. The 9–10–1 configuration is only the default; input neurons are detected from Excel.")
         anfis_clusters=st.number_input("ANFIS FCM clusters",2,30,5); anfis_m=st.number_input("ANFIS partition matrix m",1.1,5.,2.0,.1); anfis_fcm_iter=st.number_input("ANFIS FCM iterations",10,5000,200,10); anfis_thresh=st.number_input("ANFIS improvement threshold",1e-8,1.,1e-4,format="%.8f"); anfis_epochs=st.number_input("ANFIS epochs",1,5000,200); anfis_goal=st.number_input("ANFIS error goal",0.,1e6,0.); anfis_step=st.number_input("ANFIS initial step size",1e-6,1.,.01,format="%.6f"); anfis_decay=st.number_input("ANFIS step decrease rate",1.,10.,1.1,.05); switch("ANFIS")
@@ -541,6 +589,7 @@ with tab1:
             params={"Ridge":ridge_alpha,"Lasso":(lasso_alpha,lasso_iter),"EN":(en_alpha,en_l1,en_iter),"DTR":(tree_depth,tree_leaf,tree_split),"ABR":(ada_n,ada_lr,ada_loss),"GBR":(gb_n,gb_lr,gb_depth,gb_subsample),"HGBR":(hgb_lr,hgb_depth,hgb_iter,hgb_leaf),"RFR":(rf_n,rf_depth,rf_leaf),"ETR":(et_n,et_depth,et_leaf),"BGR":(bag_n,bag_samples,bag_features),"SVR":(svr_kernel,svr_c,svr_epsilon,svr_degree),"KNN":(knn_k,knn_weights,knn_p),"MLP":(mlp_l1,mlp_l2,mlp_activation,mlp_alpha,mlp_iter),"ELM":(elm_hidden,elm_activation,elm_alpha)}
             if XGB_AVAILABLE: params["XGB"]=(xgb_n,xgb_depth,xgb_lr,xgb_alpha,xgb_subsample,xgb_colsample)
             all_models=make_models(params,int(seed)); results=[]; fitted={}; prediction_data={}; convergence_data={}; base_actual_pred=[]; best_hyperparams=None; progress=st.progress(0); status=st.empty()
+            analysis_specs={k:dict(v) for k,v in {"LR":{},"Ridge":{"alpha":ridge_alpha},"Lasso":{"alpha":lasso_alpha,"max_iter":lasso_iter},"EN":{"alpha":en_alpha,"l1_ratio":en_l1,"max_iter":en_iter},"DTR":{"max_depth":safe_max_depth(tree_depth),"min_samples_leaf":tree_leaf,"min_samples_split":tree_split},"ABR":{"n_estimators":ada_n,"learning_rate":ada_lr,"loss":ada_loss},"GBR":{"n_estimators":gb_n,"learning_rate":gb_lr,"max_depth":gb_depth,"subsample":gb_subsample},"HGBR":{"learning_rate":hgb_lr,"max_depth":safe_max_depth(hgb_depth),"max_iter":hgb_iter,"min_samples_leaf":hgb_leaf},"RFR":{"n_estimators":rf_n,"max_depth":safe_max_depth(rf_depth),"min_samples_leaf":rf_leaf},"ETR":{"n_estimators":et_n,"max_depth":safe_max_depth(et_depth),"min_samples_leaf":et_leaf},"BGR":{"n_estimators":bag_n,"max_samples":bag_samples,"max_features":bag_features},"SVR":{"kernel":svr_kernel,"C":svr_c,"epsilon":svr_epsilon,"degree":svr_degree},"KNN":{"n_neighbors":knn_k,"weights":knn_weights,"p":knn_p},"XGB":{"n_estimators":xgb_n,"max_depth":xgb_depth,"learning_rate":xgb_lr,"alpha":xgb_alpha,"subsample":xgb_subsample,"colsample_bytree":xgb_colsample},"MLP":{"hidden_layer_sizes":(mlp_l1,mlp_l2),"activation":mlp_activation,"alpha":mlp_alpha,"max_iter":mlp_iter},"ELM":{"hidden":elm_hidden,"activation":elm_activation,"alpha":elm_alpha}}.items()}
             if auto_tune_16:
                 st.info("Auto-tuning the 16 base regressors on a validation split of the training data. Final reported TR/TS metrics use the selected hyperparameters retrained on the full training set.")
                 tune_bar=st.progress(0)
@@ -548,6 +597,9 @@ with tab1:
                 for code,spec in best_specs.items():
                     if code in all_models: all_models[code]=_make_base_from_spec(code,spec,int(seed))
                 st.session_state.best_hyperparams=best_hyperparams
+                analysis_specs.update({k:dict(v) for k,v in best_specs.items()})
+            else:
+                st.session_state.best_hyperparams=None
             hybrid_cfg={"ANFIS":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),seed=int(seed)),"PSO-ANN":dict(hidden=int(ann_h),swarm=int(pso_swarm),iterations=int(pso_iter),c1=float(pso_c1),c2=float(pso_c2),inertia=float(pso_inertia),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"GA-ANN":dict(hidden=int(ann_h),population=int(ga_pop),generations=int(ga_gen),crossover=float(ga_cross),mutation=float(ga_mut),elite=int(ga_elite),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"GWO-ANN":dict(hidden=int(ann_h),wolves=int(gwo_wolves),iterations=int(gwo_iter),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"MPA-ANN":dict(hidden=int(ann_h),population=int(mpa_pop),iterations=int(mpa_iter),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"OOA-ANN":dict(hidden=int(ann_h),population=int(ooa_pop),iterations=int(ooa_iter),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"CGF-ANN":dict(hidden=int(ann_h),iterations=int(cgf_iter),step=float(cgf_step),error_goal=0.0,lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"ANFIS-MPA":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),population=int(mpa_pop),iterations=int(mpa_iter),seed=int(seed)),"ANFIS-OOA":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),population=int(ooa_pop),iterations=int(ooa_iter),seed=int(seed)),"ANFIS-ELM":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),elm_hidden=int(elm_hidden),elm_alpha=float(elm_alpha),elm_activation=elm_activation,seed=int(seed))}
             for i,name in enumerate(selected_models,1):
                 status.info(f"Training {name} — {MODEL_NAMES[name]}"); start=time.time()
@@ -565,6 +617,18 @@ with tab1:
                     results.append({"Model":name,"R2_Train":np.nan,"RMSE_Train":np.nan,"MAE_Train":np.nan,"R2_Test":np.nan,"RMSE_Test":np.nan,"MAE_Test":np.nan,"Time_s":time.time()-start,"Error":str(e)})
                 progress.progress(i/max(1,len(selected_models)))
             results_df=pd.DataFrame(results).sort_values("R2_Test",ascending=False,na_position="last").reset_index(drop=True); st.session_state.results=results_df; st.session_state.trained_models=fitted; st.session_state.predictions=prediction_data; st.session_state.convergence=convergence_data; st.session_state.base_actual_predicted=pd.DataFrame(base_actual_pred); st.session_state.model_config={"ann_hidden":int(ann_h),"n_inputs":n_in,"anfis":hybrid_cfg["ANFIS"],"pso":hybrid_cfg["PSO-ANN"],"ga":hybrid_cfg["GA-ANN"],"gwo":hybrid_cfg["GWO-ANN"],"mpa":hybrid_cfg["MPA-ANN"],"ooa":hybrid_cfg["OOA-ANN"],"cgf":hybrid_cfg["CGF-ANN"]}; status.success("Training completed successfully."); st.dataframe(results_df,use_container_width=True)
+            if run_1000_16:
+                st.markdown("### 16-Model 1000-Iteration / Estimator Actual vs Predicted Analysis")
+                st.caption("Actual values are taken directly from the target column of the uploaded Excel data. Predicted values are generated by each model on the same aligned training/testing rows. For models without an iteration/estimator control, the selected best hyperparameters are retained and the sheet marks the setting as N/A.")
+                bar1000=st.progress(0); status1000=st.empty()
+                r1000,p1000,h1000=run_16_model_1000_analysis(X_train,y_train,X_test,y_test,analysis_specs,int(seed),progress_cb=lambda v: bar1000.progress(min(1.0,max(0.0,float(v)))))
+                st.session_state.results_16_1000=r1000; st.session_state.actual_pred_16_1000=p1000; st.session_state.hyperparams_16_1000=h1000
+                status1000.success("1000-iteration/estimator analysis completed for all 16 base models.")
+                c1,c2=st.columns(2)
+                with c1:
+                    st.markdown("**Training result — 1000 setting**"); st.dataframe(r1000[["Model","R2_Train","RMSE_Train","MAE_Train","Iteration_Setting","Hyperparameters_1000"]],use_container_width=True)
+                with c2:
+                    st.markdown("**Testing result — 1000 setting**"); st.dataframe(r1000[["Model","R2_Test","RMSE_Test","MAE_Test","Iteration_Setting","Hyperparameters_1000"]],use_container_width=True)
 
 # CGF-ANN Nh=2–30 research sweep (independent of the normal model run).
 if cgf_sweep:
@@ -646,7 +710,7 @@ if run_mpa_ooa_sweep:
         prog_m=st.progress(0); status_m=st.empty(); counter=0
         # Run each experiment with live progress.
         rows_m=[]; hist_m={}; pred_m=[]
-        for arch in ((8,17,1),(8,27,1)):
+        for arch in ((8,17,1),(8,26,1)):
             for algorithm in ("MPA","OOA"):
                 for iterations in (500,1000):
                     for population in range(10,101,10):
@@ -722,6 +786,9 @@ with tab2:
             if "base_actual_predicted" in st.session_state and not st.session_state.base_actual_predicted.empty:
                 st.subheader("Actual vs Predicted — 16 Base Models")
                 st.dataframe(st.session_state.base_actual_predicted,use_container_width=True,height=350)
+            if "actual_pred_16_1000" in st.session_state and not st.session_state.actual_pred_16_1000.empty:
+                st.subheader("Actual vs Predicted — 16 Base Models at 1000 Iterations/Estimators")
+                st.dataframe(st.session_state.actual_pred_16_1000,use_container_width=True,height=350)
             st.subheader("Observed vs Predicted")
             if st.session_state.trained_models:
                 sm=st.selectbox("Select Model",list(st.session_state.trained_models.keys()))
@@ -748,6 +815,17 @@ with tab2:
             test_export=results[[c for c in results.columns if c in ["Model","R2_Test","RMSE_Test","MAE_Test","Time_s","Configuration","Error"]]].copy()
             train_export.to_excel(w,index=False,sheet_name="Training Result")
             test_export.to_excel(w,index=False,sheet_name="Testing Result")
+            if "results_16_1000" in st.session_state:
+                r16=st.session_state.results_16_1000.copy()
+                r16[["Model","R2_Train","RMSE_Train","MAE_Train","Iteration_Setting","Hyperparameters_1000"]].to_excel(w,index=False,sheet_name="Training_16_1000")
+                r16[["Model","R2_Test","RMSE_Test","MAE_Test","Iteration_Setting","Hyperparameters_1000"]].to_excel(w,index=False,sheet_name="Testing_16_1000")
+            if "actual_pred_16_1000" in st.session_state:
+                ap16=st.session_state.actual_pred_16_1000.copy()
+                ap16[ap16["Dataset"]=="TR"].to_excel(w,index=False,sheet_name="Train_Actual_Pred_16")
+                ap16[ap16["Dataset"]=="TS"].to_excel(w,index=False,sheet_name="Test_Actual_Pred_16")
+                ap16.to_excel(w,index=False,sheet_name="Actual_Pred_16_1000")
+            if "hyperparams_16_1000" in st.session_state:
+                st.session_state.hyperparams_16_1000.to_excel(w,index=False,sheet_name="Hyperparams_16_1000")
             for mn,hdf in st.session_state.get("convergence",{}).items(): hdf.to_excel(w,index=False,sheet_name=f"{mn}_Convergence"[:31])
             if "cgf_sweep_results" in st.session_state:
                 st.session_state.cgf_sweep_results.to_excel(w,index=False,sheet_name="CGF-ANN_Nh_2-30")
