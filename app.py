@@ -35,7 +35,7 @@ MODEL_NAMES = {
     "ANFIS":"ANFIS (FCM Neuro-Fuzzy)","PSO-ANN":"PSO-ANN","GA-ANN":"GA-ANN","GWO-ANN":"GWO-ANN","MPA-ANN":"MPA-ANN (Marine Predators)","OOA-ANN":"OOA-ANN (Osprey)","ANFIS-MPA":"ANFIS-MPA","ANFIS-OOA":"ANFIS-OOA","ANFIS-ELM":"ANFIS-ELM"
 }
 
-for key, default in [("results",None),("trained_models",{}),("predictions",{}),("convergence",{})]:
+for key, default in [("results",None),("trained_models",{}),("predictions",{}),("convergence",{}),("nh_sweep",None)]:
     if key not in st.session_state: st.session_state[key] = default
 
 
@@ -189,6 +189,19 @@ def ooa_optimize(objective, dim, pop_size, iterations, lower, upper, seed=1):
         if fit[j]<best_fit: best=X[j].copy(); best_fit=float(fit[j])
         history.append(float(np.sqrt(best_fit)))
     return best,pd.DataFrame({"Iteration":np.arange(1,iterations+1),"RMSE":history})
+
+def ann_nh_sweep(X_train,y_train,X_test,y_test,algorithm,population,iterations,lower,upper,seed,progress_callback=None):
+    rows=[]
+    total=29
+    for j,h in enumerate(range(2,31),1):
+        cfg={"hidden":h,"population":int(population),"iterations":int(iterations),"lower":float(lower),"upper":float(upper),"seed":int(seed)+h}
+        weights,_=optimized_ann_fit(algorithm,X_train,y_train,cfg)
+        ptr=ann_predict(weights,X_train,X_train.shape[1],h)
+        pte=ann_predict(weights,X_test,X_train.shape[1],h)
+        rows.append({"Hidden Neurons (Nh)":h,"R2_Train":float(r2_score(y_train,ptr)),"R2_Test":float(r2_score(y_test,pte)),"RMSE_Train":float(np.sqrt(mean_squared_error(y_train,ptr))),"RMSE_Test":float(np.sqrt(mean_squared_error(y_test,pte))),"MAE_Train":float(mean_absolute_error(y_train,ptr)),"MAE_Test":float(mean_absolute_error(y_test,pte))})
+        if progress_callback: progress_callback(j/total)
+    return pd.DataFrame(rows)
+
 
 def optimized_ann_fit(algorithm,X,y,p):
     n_in=X.shape[1]; h=p["hidden"]; dim=n_in*h+2*h+1
@@ -360,6 +373,11 @@ with tab1:
         gwo_wolves=st.number_input("GWO wolf population",3,500,20); gwo_iter=st.number_input("GWO iterations",1,5000,500); switch("GWO-ANN")
         mpa_pop=st.number_input("MPA population",3,500,20); mpa_iter=st.number_input("MPA iterations",1,5000,500); switch("MPA-ANN")
         ooa_pop=st.number_input("OOA osprey population",3,500,20); ooa_iter=st.number_input("OOA iterations",1,5000,500); switch("OOA-ANN")
+        st.markdown("### ANN Hidden-Neuron Sweep (MPA + OOA)")
+        st.caption("Runs one ANN architecture sweep for Nh = 2–30. Only the hidden-neuron count changes; MPA and OOA optimize the ANN weights for every Nh.")
+        sweep_pop=st.number_input("Sweep population",3,500,15)
+        sweep_iter=st.number_input("Sweep iterations",1,5000,100)
+        run_sweep=st.button("▶ RUN MPA + OOA Nh=2–30 SWEEP",use_container_width=True)
         switch("ANFIS-MPA"); switch("ANFIS-OOA")
         elm_hidden=st.number_input("ELM hidden neurons",5,1000,50); elm_alpha=st.number_input("ELM regularization",1e-10,100.,1e-6,format="%.8f"); elm_activation=st.selectbox("ELM activation",["tanh","relu","sigmoid"]); switch("ANFIS-ELM")
     with right:
@@ -371,6 +389,34 @@ with tab1:
         else: st.info("Manual Split: upload separate training and testing Excel files.")
         c1,c2,c3,c4=st.columns(4); c1.metric("Models Enabled",len(selected_models)); c2.metric("Split",split_mode); c3.metric("Scaler",scaler_name); c4.markdown('<div class="ready">● READY</div>',unsafe_allow_html=True)
         run_training=st.button("▶ RUN TRAINING",type="primary",use_container_width=True)
+        if run_sweep:
+            if split_mode=="Auto Split":
+                if uploaded_file is None: st.error("Please upload an Excel (.xlsx) file before running the Nh sweep."); st.stop()
+                df=read_excel_sheet(uploaded_file,sheet_name); X=df.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; y=pd.to_numeric(df.iloc[:,-1],errors="coerce").values; valid=np.isfinite(X).all(axis=1)&np.isfinite(y); X=X[valid]; y=y[valid]
+                if len(X)<5: st.error("At least 5 valid rows are required."); st.stop()
+                X_train,X_test,y_train,y_test=train_test_split(X,y,test_size=test_percent/100,random_state=int(seed),shuffle=shuffle=="Yes")
+            else:
+                if train_file is None or test_file is None: st.error("Upload both training and testing Excel files before running the Nh sweep."); st.stop()
+                tr=read_excel_sheet(train_file,train_sheet); te=read_excel_sheet(test_file,test_sheet); X_train=tr.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; y_train=pd.to_numeric(tr.iloc[:,-1],errors="coerce").values; X_test=te.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; y_test=pd.to_numeric(te.iloc[:,-1],errors="coerce").values
+                if not (np.isfinite(X_train).all() and np.isfinite(y_train).all() and np.isfinite(X_test).all() and np.isfinite(y_test).all()): st.error("Training/testing sheets contain non-numeric or missing values in the modelling columns."); st.stop()
+            if X_train.shape[1]!=X_test.shape[1]: st.error("Training and testing files must have the same number of predictor columns."); st.stop()
+            scaler={"StandardScaler":StandardScaler,"MinMaxScaler":MinMaxScaler,"RobustScaler":RobustScaler,"None":None}[scaler_name]; sc=scaler() if scaler else None
+            if sc: X_train=sc.fit_transform(X_train); X_test=sc.transform(X_test)
+            st.info(f"Running MPA-ANN and OOA-ANN for Nh = 2–30 ({29} architectures each).")
+            prog_mpa=st.progress(0); prog_ooa=st.progress(0); status_s=st.empty()
+            status_s.info("MPA-ANN sweep in progress…")
+            mpa_df=ann_nh_sweep(X_train,y_train,X_test,y_test,"MPA",sweep_pop,sweep_iter,ann_low,ann_high,int(seed),lambda v: prog_mpa.progress(v))
+            status_s.info("OOA-ANN sweep in progress…")
+            ooa_df=ann_nh_sweep(X_train,y_train,X_test,y_test,"OOA",sweep_pop,sweep_iter,ann_low,ann_high,int(seed)+10000,lambda v: prog_ooa.progress(v))
+            mpa_df.insert(1,"Optimization","MPA-ANN"); ooa_df.insert(1,"Optimization","OOA-ANN")
+            sweep_df=pd.concat([mpa_df,ooa_df],ignore_index=True)
+            st.session_state.nh_sweep=sweep_df
+            status_s.success("MPA-ANN and OOA-ANN Nh=2–30 sweep completed.")
+            st.subheader("R² Results: Hidden Neurons Nh = 2–30")
+            st.dataframe(sweep_df[["Hidden Neurons (Nh)","Optimization","R2_Train","R2_Test"]],use_container_width=True)
+            pivot=sweep_df.pivot(index="Hidden Neurons (Nh)",columns="Optimization",values=["R2_Train","R2_Test"])
+            st.line_chart(pivot)
+            st.download_button("⬇ DOWNLOAD Nh=2–30 MPA-OOA RESULTS",sweep_df.to_csv(index=False),"MPA_OOA_ANN_Nh_2_30_Results.csv","text/csv")
         if run_training:
             if split_mode=="Auto Split":
                 if uploaded_file is None: st.error("Please upload an Excel (.xlsx) file."); st.stop()
@@ -442,6 +488,13 @@ with tab2:
                 st.dataframe(hdf,use_container_width=True,height=300)
                 st.download_button("⬇ DOWNLOAD CONVERGENCE DATA",hdf.to_csv(index=False),f"{cm}_Convergence.csv","text/csv")
 
+        if st.session_state.get("nh_sweep") is not None:
+            st.subheader("ANN Hidden-Neuron Sweep — MPA vs OOA")
+            sweep=st.session_state.nh_sweep
+            st.dataframe(sweep[["Hidden Neurons (Nh)","Optimization","R2_Train","R2_Test","RMSE_Train","RMSE_Test","MAE_Train","MAE_Test"]],use_container_width=True)
+            sp=sweep.pivot(index="Hidden Neurons (Nh)",columns="Optimization",values=["R2_Train","R2_Test"])
+            st.line_chart(sp)
+
         # Excel workbook with dedicated Training Result and Testing Result sheets.
         buf=io.BytesIO()
         with pd.ExcelWriter(buf,engine="openpyxl") as w:
@@ -449,6 +502,7 @@ with tab2:
             test_export=results[[c for c in results.columns if c in ["Model","R2_Test","RMSE_Test","MAE_Test","Time_s","Configuration","Error"]]].copy()
             train_export.to_excel(w,index=False,sheet_name="Training Result")
             test_export.to_excel(w,index=False,sheet_name="Testing Result")
+            if st.session_state.get("nh_sweep") is not None: st.session_state.nh_sweep.to_excel(w,index=False,sheet_name="ANN_Nh_2_30_MPA_OOA")
             for mn,hdf in st.session_state.get("convergence",{}).items(): hdf.to_excel(w,index=False,sheet_name=f"{mn}_Convergence"[:31])
             for mn,pd_ in st.session_state.predictions.items(): pd_.to_excel(w,index=False,sheet_name=f"{mn}_Pred"[:31])
         st.download_button("⬇ DOWNLOAD MODEL_RESULTS.XLSX",buf.getvalue(),"MLRweb_Model_Results.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
