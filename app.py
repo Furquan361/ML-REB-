@@ -32,10 +32,10 @@ st.markdown("""
 
 MODEL_NAMES = {
     "LR":"Linear Regression","Ridge":"Ridge Regression","Lasso":"Lasso Regression","EN":"Elastic Net","DTR":"Decision Tree","ABR":"AdaBoost","GBR":"Gradient Boosting","HGBR":"Hist GradBoost","RFR":"Random Forest","ETR":"Extra Trees","BGR":"Bagging","SVR":"Support Vector (SVR)","KNN":"K-Nearest Neighbors","XGB":"XGBoost","MLP":"Neural Network (MLP)",
-    "ANFIS":"ANFIS (FCM Neuro-Fuzzy)","PSO-ANN":"PSO-ANN","GA-ANN":"GA-ANN","GWO-ANN":"GWO-ANN","MPA-ANN":"MPA-ANN (Marine Predators)","OOA-ANN":"OOA-ANN (Osprey)","ANFIS-MPA":"ANFIS-MPA","ANFIS-OOA":"ANFIS-OOA","ANFIS-ELM":"ANFIS-ELM"
+    "ANFIS":"ANFIS (FCM Neuro-Fuzzy)","PSO-ANN":"PSO-ANN","GA-ANN":"GA-ANN","GWO-ANN":"GWO-ANN","MPA-ANN":"MPA-ANN (Marine Predators)","OOA-ANN":"OOA-ANN (Osprey)","ANFIS-MPA":"ANFIS-MPA","ANFIS-OOA":"ANFIS-OOA","ANFIS-ELM":"ANFIS-ELM", "CGF-ANN":"CGF-ANN (Fletcher–Reeves Conjugate Gradient)"
 }
 
-for key, default in [("results",None),("trained_models",{}),("predictions",{}),("convergence",{}),("nh_sweep",None)]:
+for key, default in [("results",None),("trained_models",{}),("predictions",{}),("convergence",{})]:
     if key not in st.session_state: st.session_state[key] = default
 
 
@@ -190,19 +190,6 @@ def ooa_optimize(objective, dim, pop_size, iterations, lower, upper, seed=1):
         history.append(float(np.sqrt(best_fit)))
     return best,pd.DataFrame({"Iteration":np.arange(1,iterations+1),"RMSE":history})
 
-def ann_nh_sweep(X_train,y_train,X_test,y_test,algorithm,population,iterations,lower,upper,seed,progress_callback=None):
-    rows=[]
-    total=29
-    for j,h in enumerate(range(2,31),1):
-        cfg={"hidden":h,"population":int(population),"iterations":int(iterations),"lower":float(lower),"upper":float(upper),"seed":int(seed)+h}
-        weights,_=optimized_ann_fit(algorithm,X_train,y_train,cfg)
-        ptr=ann_predict(weights,X_train,X_train.shape[1],h)
-        pte=ann_predict(weights,X_test,X_train.shape[1],h)
-        rows.append({"Hidden Neurons (Nh)":h,"R2_Train":float(r2_score(y_train,ptr)),"R2_Test":float(r2_score(y_test,pte)),"RMSE_Train":float(np.sqrt(mean_squared_error(y_train,ptr))),"RMSE_Test":float(np.sqrt(mean_squared_error(y_test,pte))),"MAE_Train":float(mean_absolute_error(y_train,ptr)),"MAE_Test":float(mean_absolute_error(y_test,pte))})
-        if progress_callback: progress_callback(j/total)
-    return pd.DataFrame(rows)
-
-
 def optimized_ann_fit(algorithm,X,y,p):
     n_in=X.shape[1]; h=p["hidden"]; dim=n_in*h+2*h+1
     objective=lambda w: ann_objective(w,X,y,n_in,h)
@@ -231,6 +218,46 @@ def ann_predict(weights,X,n_in,n_hidden):
 
 def ann_objective(weights,X,y,n_in,n_hidden):
     p=ann_predict(weights,X,n_in,n_hidden); return float(np.mean((p-y)**2))
+
+
+def cgf_ann_fit(X,y,p):
+    """ANN optimized by Fletcher–Reeves nonlinear conjugate gradient (CGF)."""
+    rng=np.random.default_rng(p["seed"]); n_in=X.shape[1]; h=int(p["hidden"]); lo=float(p["lower"]); hi=float(p["upper"]); it=int(p["iterations"])
+    w=rng.uniform(lo,hi,n_in*h+2*h+1)
+    def loss_grad(v):
+        W1,b1,W2,b2=ann_unpack(v,n_in,h); H=np.tanh(X@W1+b1); pred=H@W2+b2; err=pred-y
+        loss=float(np.mean(err**2)); d=(2.0/len(X))*err
+        gW2=H.T@d; gb2=float(np.sum(d)); dZ=(d[:,None]*W2[None,:])*(1-H**2); gW1=X.T@dZ; gb1=np.sum(dZ,axis=0)
+        return loss,np.r_[gW1.ravel(),gb1,gW2,gb2],pred
+    f,g,pred=loss_grad(w); d=-g; history=[_history_row(0,y,pred)]
+    for t in range(1,it+1):
+        if not np.all(np.isfinite(g)) or np.linalg.norm(g)<1e-10: break
+        step=float(p.get("step",0.1)); gd=float(np.dot(g,d))
+        if gd>=0: d=-g; gd=float(np.dot(g,d))
+        accepted=False
+        for _ in range(20):
+            cand=np.clip(w+step*d,lo,hi); nf,ng,npred=loss_grad(cand)
+            if nf <= f + 1e-4*step*gd: accepted=True; break
+            step*=0.5
+        if not accepted: cand=np.clip(w+step*d,lo,hi); nf,ng,npred=loss_grad(cand)
+        beta=float(np.dot(ng,ng)/(np.dot(g,g)+1e-20)); beta=min(beta,10.0)
+        w=cand; f=nf; g_old=g; g=ng; d=-g+beta*d; pred=npred; history.append(_history_row(t,y,pred))
+        if f<=float(p.get("error_goal",0.0)): break
+    return w,pd.DataFrame(history)
+
+
+def cgf_ann_nh_sweep(X_train, y_train, X_test, y_test, base_cfg, nh_values=range(2,31)):
+    """Run Fletcher–Reeves CGF-ANN for Nh=2..30 and return TR/TS metrics."""
+    rows=[]
+    histories={}
+    for nh in nh_values:
+        cfg=dict(base_cfg); cfg["hidden"]=int(nh)
+        model,hist=cgf_ann_fit(X_train,y_train,cfg)
+        ptr=ann_predict(model,X_train,X_train.shape[1],int(nh))
+        pte=ann_predict(model,X_test,X_train.shape[1],int(nh))
+        rows.append({"Nh":int(nh),"Model":"CGF-ANN","R2_Train":float(r2_score(y_train,ptr)),"RMSE_Train":float(np.sqrt(mean_squared_error(y_train,ptr))),"MAE_Train":float(mean_absolute_error(y_train,ptr)),"R2_Test":float(r2_score(y_test,pte)),"RMSE_Test":float(np.sqrt(mean_squared_error(y_test,pte))),"MAE_Test":float(mean_absolute_error(y_test,pte))})
+        histories[int(nh)]=hist
+    return pd.DataFrame(rows), histories
 
 
 def initialize_ann_population(size,n_in,n_hidden,rng,low,high):
@@ -299,6 +326,7 @@ def train_hybrid(code,X,y,p):
     if code=="GA-ANN": return (*ga_ann_fit(X,y,p),)
     if code=="GWO-ANN": return (*gwo_ann_fit(X,y,p),)
     if code=="MPA-ANN": return (*optimized_ann_fit("MPA",X,y,p),)
+    if code=="CGF-ANN": return (*cgf_ann_fit(X,y,p),)
     if code=="OOA-ANN": return (*optimized_ann_fit("OOA",X,y,p),)
     if code=="ANFIS-MPA": return (*optimized_anfis_fit("MPA",X,y,p),)
     if code=="ANFIS-OOA": return (*optimized_anfis_fit("OOA",X,y,p),)
@@ -373,11 +401,8 @@ with tab1:
         gwo_wolves=st.number_input("GWO wolf population",3,500,20); gwo_iter=st.number_input("GWO iterations",1,5000,500); switch("GWO-ANN")
         mpa_pop=st.number_input("MPA population",3,500,20); mpa_iter=st.number_input("MPA iterations",1,5000,500); switch("MPA-ANN")
         ooa_pop=st.number_input("OOA osprey population",3,500,20); ooa_iter=st.number_input("OOA iterations",1,5000,500); switch("OOA-ANN")
-        st.markdown("### ANN Hidden-Neuron Sweep (MPA + OOA)")
-        st.caption("Runs one ANN architecture sweep for Nh = 2–30. Only the hidden-neuron count changes; MPA and OOA optimize the ANN weights for every Nh.")
-        sweep_pop=st.number_input("Sweep population",3,500,15)
-        sweep_iter=st.number_input("Sweep iterations",1,5000,100)
-        run_sweep=st.button("▶ RUN MPA + OOA Nh=2–30 SWEEP",use_container_width=True)
+        cgf_iter=st.number_input("CGF iterations",1,5000,500); cgf_step=st.number_input("CGF initial step",1e-5,2.0,0.1,format="%.5f"); switch("CGF-ANN")
+        cgf_sweep=st.checkbox("CGF-ANN hidden-neuron sweep (Nh=2–30)",value=False,key="cgf_nh_sweep")
         switch("ANFIS-MPA"); switch("ANFIS-OOA")
         elm_hidden=st.number_input("ELM hidden neurons",5,1000,50); elm_alpha=st.number_input("ELM regularization",1e-10,100.,1e-6,format="%.8f"); elm_activation=st.selectbox("ELM activation",["tanh","relu","sigmoid"]); switch("ANFIS-ELM")
     with right:
@@ -389,34 +414,6 @@ with tab1:
         else: st.info("Manual Split: upload separate training and testing Excel files.")
         c1,c2,c3,c4=st.columns(4); c1.metric("Models Enabled",len(selected_models)); c2.metric("Split",split_mode); c3.metric("Scaler",scaler_name); c4.markdown('<div class="ready">● READY</div>',unsafe_allow_html=True)
         run_training=st.button("▶ RUN TRAINING",type="primary",use_container_width=True)
-        if run_sweep:
-            if split_mode=="Auto Split":
-                if uploaded_file is None: st.error("Please upload an Excel (.xlsx) file before running the Nh sweep."); st.stop()
-                df=read_excel_sheet(uploaded_file,sheet_name); X=df.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; y=pd.to_numeric(df.iloc[:,-1],errors="coerce").values; valid=np.isfinite(X).all(axis=1)&np.isfinite(y); X=X[valid]; y=y[valid]
-                if len(X)<5: st.error("At least 5 valid rows are required."); st.stop()
-                X_train,X_test,y_train,y_test=train_test_split(X,y,test_size=test_percent/100,random_state=int(seed),shuffle=shuffle=="Yes")
-            else:
-                if train_file is None or test_file is None: st.error("Upload both training and testing Excel files before running the Nh sweep."); st.stop()
-                tr=read_excel_sheet(train_file,train_sheet); te=read_excel_sheet(test_file,test_sheet); X_train=tr.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; y_train=pd.to_numeric(tr.iloc[:,-1],errors="coerce").values; X_test=te.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; y_test=pd.to_numeric(te.iloc[:,-1],errors="coerce").values
-                if not (np.isfinite(X_train).all() and np.isfinite(y_train).all() and np.isfinite(X_test).all() and np.isfinite(y_test).all()): st.error("Training/testing sheets contain non-numeric or missing values in the modelling columns."); st.stop()
-            if X_train.shape[1]!=X_test.shape[1]: st.error("Training and testing files must have the same number of predictor columns."); st.stop()
-            scaler={"StandardScaler":StandardScaler,"MinMaxScaler":MinMaxScaler,"RobustScaler":RobustScaler,"None":None}[scaler_name]; sc=scaler() if scaler else None
-            if sc: X_train=sc.fit_transform(X_train); X_test=sc.transform(X_test)
-            st.info(f"Running MPA-ANN and OOA-ANN for Nh = 2–30 ({29} architectures each).")
-            prog_mpa=st.progress(0); prog_ooa=st.progress(0); status_s=st.empty()
-            status_s.info("MPA-ANN sweep in progress…")
-            mpa_df=ann_nh_sweep(X_train,y_train,X_test,y_test,"MPA",sweep_pop,sweep_iter,ann_low,ann_high,int(seed),lambda v: prog_mpa.progress(v))
-            status_s.info("OOA-ANN sweep in progress…")
-            ooa_df=ann_nh_sweep(X_train,y_train,X_test,y_test,"OOA",sweep_pop,sweep_iter,ann_low,ann_high,int(seed)+10000,lambda v: prog_ooa.progress(v))
-            mpa_df.insert(1,"Optimization","MPA-ANN"); ooa_df.insert(1,"Optimization","OOA-ANN")
-            sweep_df=pd.concat([mpa_df,ooa_df],ignore_index=True)
-            st.session_state.nh_sweep=sweep_df
-            status_s.success("MPA-ANN and OOA-ANN Nh=2–30 sweep completed.")
-            st.subheader("R² Results: Hidden Neurons Nh = 2–30")
-            st.dataframe(sweep_df[["Hidden Neurons (Nh)","Optimization","R2_Train","R2_Test"]],use_container_width=True)
-            pivot=sweep_df.pivot(index="Hidden Neurons (Nh)",columns="Optimization",values=["R2_Train","R2_Test"])
-            st.line_chart(pivot)
-            st.download_button("⬇ DOWNLOAD Nh=2–30 MPA-OOA RESULTS",sweep_df.to_csv(index=False),"MPA_OOA_ANN_Nh_2_30_Results.csv","text/csv")
         if run_training:
             if split_mode=="Auto Split":
                 if uploaded_file is None: st.error("Please upload an Excel (.xlsx) file."); st.stop()
@@ -438,11 +435,11 @@ with tab1:
             params={"Ridge":ridge_alpha,"Lasso":(lasso_alpha,lasso_iter),"EN":(en_alpha,en_l1,en_iter),"DTR":(tree_depth,tree_leaf,tree_split),"ABR":(ada_n,ada_lr,ada_loss),"GBR":(gb_n,gb_lr,gb_depth,gb_subsample),"HGBR":(hgb_lr,hgb_depth,hgb_iter,hgb_leaf),"RFR":(rf_n,rf_depth,rf_leaf),"ETR":(et_n,et_depth,et_leaf),"BGR":(bag_n,bag_samples,bag_features),"SVR":(svr_kernel,svr_c,svr_epsilon,svr_degree),"KNN":(knn_k,knn_weights,knn_p),"MLP":(mlp_l1,mlp_l2,mlp_activation,mlp_alpha,mlp_iter)}
             if XGB_AVAILABLE: params["XGB"]=(xgb_n,xgb_depth,xgb_lr,xgb_alpha,xgb_subsample,xgb_colsample)
             all_models=make_models(params,int(seed)); results=[]; fitted={}; prediction_data={}; convergence_data={}; progress=st.progress(0); status=st.empty()
-            hybrid_cfg={"ANFIS":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),seed=int(seed)),"PSO-ANN":dict(hidden=int(ann_h),swarm=int(pso_swarm),iterations=int(pso_iter),c1=float(pso_c1),c2=float(pso_c2),inertia=float(pso_inertia),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"GA-ANN":dict(hidden=int(ann_h),population=int(ga_pop),generations=int(ga_gen),crossover=float(ga_cross),mutation=float(ga_mut),elite=int(ga_elite),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"GWO-ANN":dict(hidden=int(ann_h),wolves=int(gwo_wolves),iterations=int(gwo_iter),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"MPA-ANN":dict(hidden=int(ann_h),population=int(mpa_pop),iterations=int(mpa_iter),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"OOA-ANN":dict(hidden=int(ann_h),population=int(ooa_pop),iterations=int(ooa_iter),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"ANFIS-MPA":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),population=int(mpa_pop),iterations=int(mpa_iter),seed=int(seed)),"ANFIS-OOA":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),population=int(ooa_pop),iterations=int(ooa_iter),seed=int(seed)),"ANFIS-ELM":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),elm_hidden=int(elm_hidden),elm_alpha=float(elm_alpha),elm_activation=elm_activation,seed=int(seed))}
+            hybrid_cfg={"ANFIS":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),seed=int(seed)),"PSO-ANN":dict(hidden=int(ann_h),swarm=int(pso_swarm),iterations=int(pso_iter),c1=float(pso_c1),c2=float(pso_c2),inertia=float(pso_inertia),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"GA-ANN":dict(hidden=int(ann_h),population=int(ga_pop),generations=int(ga_gen),crossover=float(ga_cross),mutation=float(ga_mut),elite=int(ga_elite),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"GWO-ANN":dict(hidden=int(ann_h),wolves=int(gwo_wolves),iterations=int(gwo_iter),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"MPA-ANN":dict(hidden=int(ann_h),population=int(mpa_pop),iterations=int(mpa_iter),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"OOA-ANN":dict(hidden=int(ann_h),population=int(ooa_pop),iterations=int(ooa_iter),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"CGF-ANN":dict(hidden=int(ann_h),iterations=int(cgf_iter),step=float(cgf_step),error_goal=0.0,lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"ANFIS-MPA":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),population=int(mpa_pop),iterations=int(mpa_iter),seed=int(seed)),"ANFIS-OOA":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),population=int(ooa_pop),iterations=int(ooa_iter),seed=int(seed)),"ANFIS-ELM":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),elm_hidden=int(elm_hidden),elm_alpha=float(elm_alpha),elm_activation=elm_activation,seed=int(seed))}
             for i,name in enumerate(selected_models,1):
                 status.info(f"Training {name} — {MODEL_NAMES[name]}"); start=time.time()
                 try:
-                    if name in ["ANFIS","PSO-ANN","GA-ANN","GWO-ANN","MPA-ANN","OOA-ANN","ANFIS-MPA","ANFIS-OOA","ANFIS-ELM"]:
+                    if name in ["ANFIS","PSO-ANN","GA-ANN","GWO-ANN","MPA-ANN","OOA-ANN","CGF-ANN","ANFIS-MPA","ANFIS-OOA","ANFIS-ELM"]:
                         model,history=train_hybrid(name,X_train,y_train,hybrid_cfg[name]); ptr=hybrid_predict(name,model,X_train,n_in,int(ann_h)); pte=hybrid_predict(name,model,X_test,n_in,int(ann_h)); convergence_data[name]=history; cfg=hybrid_cfg[name]
                         extra={"Configuration":("FCM clusters="+str(cfg["n_clusters"]) if name.startswith("ANFIS") else "Nh="+str(cfg["hidden"]))}
                     else:
@@ -451,7 +448,46 @@ with tab1:
                 except Exception as e:
                     results.append({"Model":name,"R2_Train":np.nan,"RMSE_Train":np.nan,"MAE_Train":np.nan,"R2_Test":np.nan,"RMSE_Test":np.nan,"MAE_Test":np.nan,"Time_s":time.time()-start,"Error":str(e)})
                 progress.progress(i/max(1,len(selected_models)))
-            results_df=pd.DataFrame(results).sort_values("R2_Test",ascending=False,na_position="last").reset_index(drop=True); st.session_state.results=results_df; st.session_state.trained_models=fitted; st.session_state.predictions=prediction_data; st.session_state.convergence=convergence_data; st.session_state.model_config={"ann_hidden":int(ann_h),"n_inputs":n_in,"anfis":hybrid_cfg["ANFIS"],"pso":hybrid_cfg["PSO-ANN"],"ga":hybrid_cfg["GA-ANN"],"gwo":hybrid_cfg["GWO-ANN"]}; status.success("Training completed successfully."); st.dataframe(results_df,use_container_width=True)
+            results_df=pd.DataFrame(results).sort_values("R2_Test",ascending=False,na_position="last").reset_index(drop=True); st.session_state.results=results_df; st.session_state.trained_models=fitted; st.session_state.predictions=prediction_data; st.session_state.convergence=convergence_data; st.session_state.model_config={"ann_hidden":int(ann_h),"n_inputs":n_in,"anfis":hybrid_cfg["ANFIS"],"pso":hybrid_cfg["PSO-ANN"],"ga":hybrid_cfg["GA-ANN"],"gwo":hybrid_cfg["GWO-ANN"],"mpa":hybrid_cfg["MPA-ANN"],"ooa":hybrid_cfg["OOA-ANN"],"cgf":hybrid_cfg["CGF-ANN"]}; status.success("Training completed successfully."); st.dataframe(results_df,use_container_width=True)
+
+# CGF-ANN Nh=2–30 research sweep (independent of the normal model run).
+if cgf_sweep:
+    st.markdown("### CGF-ANN Hidden-Neuron Analysis (Nh = 2–30)")
+    run_cgf_sweep=st.button("▶ RUN CGF-ANN Nh=2–30",type="secondary",use_container_width=True,key="run_cgf_sweep")
+    if run_cgf_sweep:
+        if split_mode=="Auto Split":
+            if uploaded_file is None:
+                st.error("Please upload an Excel (.xlsx) file before running the CGF sweep."); st.stop()
+            df_s=read_excel_sheet(uploaded_file,sheet_name); Xs=df_s.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; ys=pd.to_numeric(df_s.iloc[:,-1],errors="coerce").values; valid_s=np.isfinite(Xs).all(axis=1)&np.isfinite(ys); Xs=Xs[valid_s]; ys=ys[valid_s]
+            Xtr_s,Xte_s,ytr_s,yte_s=train_test_split(Xs,ys,test_size=test_percent/100,random_state=int(seed),shuffle=shuffle=="Yes")
+        else:
+            if train_file is None or test_file is None:
+                st.error("Upload both training and testing Excel files before running the CGF sweep."); st.stop()
+            tr_s=read_excel_sheet(train_file,train_sheet); te_s=read_excel_sheet(test_file,test_sheet); Xtr_s=tr_s.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; ytr_s=pd.to_numeric(tr_s.iloc[:,-1],errors="coerce").values; Xte_s=te_s.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; yte_s=pd.to_numeric(te_s.iloc[:,-1],errors="coerce").values
+        scaler_cls={"StandardScaler":StandardScaler,"MinMaxScaler":MinMaxScaler,"RobustScaler":RobustScaler,"None":None}[scaler_name]
+        if scaler_cls is not None:
+            sc_s=scaler_cls(); Xtr_s=sc_s.fit_transform(Xtr_s); Xte_s=sc_s.transform(Xte_s)
+        sweep_cfg={"hidden":10,"iterations":int(cgf_iter),"step":float(cgf_step),"error_goal":0.0,"lower":float(ann_low),"upper":float(ann_high),"seed":int(seed)}
+        prog_s=st.progress(0); status_s=st.empty(); rows_s=[]; hist_s={}
+        for idx,nh in enumerate(range(2,31),1):
+            status_s.info(f"Running CGF-ANN with Nh={nh} ({idx}/29)")
+            cfg_s=dict(sweep_cfg); cfg_s["hidden"]=nh
+            model_s,hist=cgf_ann_fit(Xtr_s,ytr_s,cfg_s)
+            ptr_s=ann_predict(model_s,Xtr_s,Xtr_s.shape[1],nh); pte_s=ann_predict(model_s,Xte_s,Xtr_s.shape[1],nh)
+            rows_s.append({"Nh":nh,"Model":"CGF-ANN","R2_Train":r2_score(ytr_s,ptr_s),"RMSE_Train":np.sqrt(mean_squared_error(ytr_s,ptr_s)),"MAE_Train":mean_absolute_error(ytr_s,ptr_s),"R2_Test":r2_score(yte_s,pte_s),"RMSE_Test":np.sqrt(mean_squared_error(yte_s,pte_s)),"MAE_Test":mean_absolute_error(yte_s,pte_s)})
+            hist_s[nh]=hist; prog_s.progress(idx/29)
+        cgf_sweep_df=pd.DataFrame(rows_s)
+        st.session_state.cgf_sweep_results=cgf_sweep_df; st.session_state.cgf_sweep_history=hist_s
+        status_s.success("CGF-ANN Nh=2–30 sweep completed.")
+    if "cgf_sweep_results" in st.session_state:
+        sdf=st.session_state.cgf_sweep_results
+        st.dataframe(sdf,use_container_width=True)
+        st.line_chart(sdf.set_index("Nh")[["R2_Train","R2_Test"]])
+        sbuf=io.BytesIO()
+        with pd.ExcelWriter(sbuf,engine="openpyxl") as sw:
+            sdf.to_excel(sw,index=False,sheet_name="CGF-ANN_Nh_2-30")
+            for nh,hdf in st.session_state.get("cgf_sweep_history",{}).items(): hdf.to_excel(sw,index=False,sheet_name=f"CGF_Nh_{nh}_Conv")
+        st.download_button("⬇ DOWNLOAD CGF Nh=2–30 EXCEL",sbuf.getvalue(),"CGF-ANN_Nh_2-30_Results.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",key="download_cgf_sweep")
 
 with tab2:
     st.markdown('<div class="section-title">RESULTS & ANALYSIS</div>',unsafe_allow_html=True); results=st.session_state.results
@@ -488,13 +524,6 @@ with tab2:
                 st.dataframe(hdf,use_container_width=True,height=300)
                 st.download_button("⬇ DOWNLOAD CONVERGENCE DATA",hdf.to_csv(index=False),f"{cm}_Convergence.csv","text/csv")
 
-        if st.session_state.get("nh_sweep") is not None:
-            st.subheader("ANN Hidden-Neuron Sweep — MPA vs OOA")
-            sweep=st.session_state.nh_sweep
-            st.dataframe(sweep[["Hidden Neurons (Nh)","Optimization","R2_Train","R2_Test","RMSE_Train","RMSE_Test","MAE_Train","MAE_Test"]],use_container_width=True)
-            sp=sweep.pivot(index="Hidden Neurons (Nh)",columns="Optimization",values=["R2_Train","R2_Test"])
-            st.line_chart(sp)
-
         # Excel workbook with dedicated Training Result and Testing Result sheets.
         buf=io.BytesIO()
         with pd.ExcelWriter(buf,engine="openpyxl") as w:
@@ -502,8 +531,9 @@ with tab2:
             test_export=results[[c for c in results.columns if c in ["Model","R2_Test","RMSE_Test","MAE_Test","Time_s","Configuration","Error"]]].copy()
             train_export.to_excel(w,index=False,sheet_name="Training Result")
             test_export.to_excel(w,index=False,sheet_name="Testing Result")
-            if st.session_state.get("nh_sweep") is not None: st.session_state.nh_sweep.to_excel(w,index=False,sheet_name="ANN_Nh_2_30_MPA_OOA")
             for mn,hdf in st.session_state.get("convergence",{}).items(): hdf.to_excel(w,index=False,sheet_name=f"{mn}_Convergence"[:31])
+            if "cgf_sweep_results" in st.session_state:
+                st.session_state.cgf_sweep_results.to_excel(w,index=False,sheet_name="CGF-ANN_Nh_2-30")
             for mn,pd_ in st.session_state.predictions.items(): pd_.to_excel(w,index=False,sheet_name=f"{mn}_Pred"[:31])
         st.download_button("⬇ DOWNLOAD MODEL_RESULTS.XLSX",buf.getvalue(),"MLRweb_Model_Results.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
