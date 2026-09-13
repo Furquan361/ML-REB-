@@ -31,7 +31,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 MODEL_NAMES = {
-    "LR":"Linear Regression","Ridge":"Ridge Regression","Lasso":"Lasso Regression","EN":"Elastic Net","DTR":"Decision Tree","ABR":"AdaBoost","GBR":"Gradient Boosting","HGBR":"Hist GradBoost","RFR":"Random Forest","ETR":"Extra Trees","BGR":"Bagging","SVR":"Support Vector (SVR)","KNN":"K-Nearest Neighbors","XGB":"XGBoost","MLP":"Neural Network (MLP)",
+    "LR":"Linear Regression","Ridge":"Ridge Regression","Lasso":"Lasso Regression","EN":"Elastic Net","DTR":"Decision Tree","ABR":"AdaBoost","GBR":"Gradient Boosting","HGBR":"Hist GradBoost","RFR":"Random Forest","ETR":"Extra Trees","BGR":"Bagging","SVR":"Support Vector (SVR)","KNN":"K-Nearest Neighbors","XGB":"XGBoost","MLP":"Neural Network (MLP)","ELM":"Extreme Learning Machine (ELM)",
     "ANFIS":"ANFIS (FCM Neuro-Fuzzy)","PSO-ANN":"PSO-ANN","GA-ANN":"GA-ANN","GWO-ANN":"GWO-ANN","MPA-ANN":"MPA-ANN (Marine Predators)","OOA-ANN":"OOA-ANN (Osprey)","ANFIS-MPA":"ANFIS-MPA","ANFIS-OOA":"ANFIS-OOA","ANFIS-ELM":"ANFIS-ELM", "CGF-ANN":"CGF-ANN (Fletcher–Reeves Conjugate Gradient)"
 }
 
@@ -61,6 +61,7 @@ def make_models(p, seed):
         "BGR":BaggingRegressor(n_estimators=p["BGR"][0],max_samples=p["BGR"][1],max_features=p["BGR"][2],random_state=seed,n_jobs=-1),
         "SVR":SVR(kernel=p["SVR"][0],C=p["SVR"][1],epsilon=p["SVR"][2],degree=p["SVR"][3]),
         "KNN":KNeighborsRegressor(n_neighbors=p["KNN"][0],weights=p["KNN"][1],p=p["KNN"][2]),
+        "ELM":ELMRegressor(hidden=p["ELM"][0],activation=p["ELM"][1],alpha=p["ELM"][2],seed=seed),
         "MLP":MLPRegressor(hidden_layer_sizes=(p["MLP"][0],p["MLP"][1]),activation=p["MLP"][2],alpha=p["MLP"][3],max_iter=p["MLP"][4],random_state=seed)
     }
     if XGB_AVAILABLE:
@@ -375,6 +376,74 @@ def hybrid_predict(code,model,X,n_in,h):
     return ann_predict(model,X,n_in,h)
 
 
+
+def _base_candidate_models(seed):
+    """Compact, reproducible candidate sets used for automatic tuning of the 16 base regressors."""
+    grids={
+        "LR":[{}],
+        "Ridge":[{"alpha":a} for a in [0.01,0.1,1,10,100]],
+        "Lasso":[{"alpha":a,"max_iter":10000} for a in [1e-5,1e-4,1e-3,1e-2,1e-1]],
+        "EN":[{"alpha":a,"l1_ratio":r,"max_iter":10000} for a in [1e-4,1e-3,1e-2,1e-1] for r in [0.2,0.5,0.8]],
+        "DTR":[{"max_depth":d,"min_samples_leaf":l,"min_samples_split":sp} for d in [None,3,5,8,12] for l in [1,2,5] for sp in [2,5,10]],
+        "ABR":[{"n_estimators":n,"learning_rate":lr,"loss":loss} for n in [50,100,200] for lr in [0.03,0.1,0.3] for loss in ["linear","square","exponential"]],
+        "GBR":[{"n_estimators":n,"learning_rate":lr,"max_depth":d,"subsample":ss} for n in [100,300,500] for lr in [0.03,0.1] for d in [2,3,5] for ss in [0.8,1.0]],
+        "HGBR":[{"learning_rate":lr,"max_depth":d,"max_iter":it,"min_samples_leaf":leaf} for lr in [0.03,0.1] for d in [None,3,6] for it in [100,300] for leaf in [10,20]],
+        "RFR":[{"n_estimators":n,"max_depth":d,"min_samples_leaf":l} for n in [100,300,500] for d in [None,5,10,20] for l in [1,5,10]],
+        "ETR":[{"n_estimators":n,"max_depth":d,"min_samples_leaf":l} for n in [100,300,500] for d in [None,5,10,20] for l in [1,5,10]],
+        "BGR":[{"n_estimators":n,"max_samples":ms,"max_features":mf} for n in [50,100,200] for ms in [0.7,1.0] for mf in [0.7,1.0]],
+        "SVR":[{"kernel":k,"C":C,"epsilon":e,"degree":d} for k in ["rbf","linear","poly"] for C in [1,100,10000] for e in [0.01,0.1,1] for d in [2,3]],
+        "KNN":[{"n_neighbors":k,"weights":w,"p":p} for k in [2,3,5,7,10,15] for w in ["uniform","distance"] for p in [1,2]],
+        "XGB":[{"n_estimators":n,"max_depth":d,"learning_rate":lr,"alpha":a,"subsample":ss,"colsample_bytree":cs} for n in [100,300,500] for d in [2,4,6] for lr in [0.03,0.1] for a in [0,0.2] for ss in [0.8,1.0] for cs in [0.8,1.0]],
+        "MLP":[{"hidden_layer_sizes":h,"activation":act,"alpha":a,"max_iter":3000} for h in [(50,), (100,), (100,50), (150,75)] for act in ["relu","tanh"] for a in [1e-5,1e-3,1e-2]],
+        "ELM":[{"hidden":h,"activation":act,"alpha":a} for h in [20,50,100,200,400] for act in ["tanh","relu","sigmoid"] for a in [1e-8,1e-6,1e-4]],
+    }
+    return grids
+
+
+def _make_base_from_spec(code,spec,seed):
+    if code=="LR": return LinearRegression()
+    if code=="Ridge": return Ridge(**spec)
+    if code=="Lasso": return Lasso(random_state=seed,**spec)
+    if code=="EN": return ElasticNet(random_state=seed,**spec)
+    if code=="DTR": return DecisionTreeRegressor(random_state=seed,**spec)
+    if code=="ABR": return AdaBoostRegressor(random_state=seed,**spec)
+    if code=="GBR": return GradientBoostingRegressor(random_state=seed,**spec)
+    if code=="HGBR": return HistGradientBoostingRegressor(random_state=seed,**spec)
+    if code=="RFR": return RandomForestRegressor(random_state=seed,n_jobs=-1,**spec)
+    if code=="ETR": return ExtraTreesRegressor(random_state=seed,n_jobs=-1,**spec)
+    if code=="BGR": return BaggingRegressor(random_state=seed,n_jobs=-1,**spec)
+    if code=="SVR": return SVR(**spec)
+    if code=="KNN": return KNeighborsRegressor(**spec)
+    if code=="XGB" and XGB_AVAILABLE: return xgb.XGBRegressor(random_state=seed,verbosity=0,objective="reg:squarederror",n_jobs=-1,**spec)
+    if code=="MLP": return MLPRegressor(random_state=seed,**spec)
+    if code=="ELM": return ELMRegressor(seed=seed,**spec)
+    return None
+
+
+def tune_16_base_models(X,y,seed,progress_cb=None):
+    """Tune the 15 original models + ELM using a validation split of the training data."""
+    Xt,Xv,yt,yv=train_test_split(X,y,test_size=0.2,random_state=seed,shuffle=True)
+    grids=_base_candidate_models(seed)
+    codes=["LR","Ridge","Lasso","EN","DTR","ABR","GBR","HGBR","RFR","ETR","BGR","SVR","KNN"]
+    if XGB_AVAILABLE: codes.append("XGB")
+    codes += ["MLP","ELM"]
+    best_specs={}; rows=[]
+    total=sum(len(grids[c]) for c in codes); counter=0
+    for code in codes:
+        best_r2=-np.inf; best_spec=grids[code][0]; best_rmse=np.inf
+        for spec in grids[code]:
+            counter+=1
+            try:
+                m=_make_base_from_spec(code,spec,seed); m.fit(Xt,yt); pv=m.predict(Xv); r=r2_score(yv,pv); rm=np.sqrt(mean_squared_error(yv,pv))
+                if (r>best_r2) or (np.isclose(r,best_r2) and rm<best_rmse): best_r2=float(r); best_rmse=float(rm); best_spec=dict(spec)
+            except Exception:
+                pass
+            if progress_cb: progress_cb(counter/max(1,total))
+        best_specs[code]=best_spec
+        rows.append({"Model":code,"Best_Hyperparameters":str(best_spec),"Validation_R2":best_r2,"Validation_RMSE":best_rmse})
+    return best_specs,pd.DataFrame(rows).sort_values("Validation_R2",ascending=False).reset_index(drop=True)
+
+
 def metric_row(name,ytr,ptr,yte,pte,elapsed,extra=None):
     d={"Model":name,"R2_Train":r2_score(ytr,ptr),"RMSE_Train":np.sqrt(mean_squared_error(ytr,ptr)),"MAE_Train":mean_absolute_error(ytr,ptr),"R2_Test":r2_score(yte,pte),"RMSE_Test":np.sqrt(mean_squared_error(yte,pte)),"MAE_Test":mean_absolute_error(yte,pte),"Time_s":elapsed}
     if extra: d.update(extra)
@@ -427,6 +496,8 @@ with tab1:
         if XGB_AVAILABLE:
             xgb_n=st.number_input("XGB n_est",5,2000,45); xgb_depth=st.number_input("XGB max_depth",1,100,4); xgb_lr=st.number_input("XGB lr",.0001,2.,.35); xgb_alpha=st.number_input("XGB alpha",0.,1000.,.2); xgb_subsample=st.number_input("XGB subsample",.1,1.,1.); xgb_colsample=st.number_input("XGB col_bt",.1,1.,1.); switch("XGB")
         mlp_l1=st.number_input("MLP layer1",1,1000,100); mlp_l2=st.number_input("MLP layer2",1,1000,50); mlp_activation=st.selectbox("MLP activation",["relu","tanh","logistic"]); mlp_alpha=st.number_input("MLP alpha",.0000001,10.,.0001,format="%.7f"); mlp_iter=st.number_input("MLP max_iter",100,20000,5000,100); switch("MLP")
+        elm_hidden=st.number_input("ELM hidden neurons",5,1000,100,key="base_elm_hidden"); elm_alpha=st.number_input("ELM regularization",1e-10,100.,1e-6,format="%.8f",key="base_elm_alpha"); elm_activation=st.selectbox("ELM activation",["tanh","relu","sigmoid"],key="base_elm_activation"); switch("ELM")
+        auto_tune_16=st.checkbox("Auto-tune all 16 base models and report best hyperparameters",value=True)
         st.markdown("### RESEARCH / ANN–ANFIS MODELS")
         st.caption("All parameters below are editable. The 9–10–1 configuration is only the default; input neurons are detected from Excel.")
         anfis_clusters=st.number_input("ANFIS FCM clusters",2,30,5); anfis_m=st.number_input("ANFIS partition matrix m",1.1,5.,2.0,.1); anfis_fcm_iter=st.number_input("ANFIS FCM iterations",10,5000,200,10); anfis_thresh=st.number_input("ANFIS improvement threshold",1e-8,1.,1e-4,format="%.8f"); anfis_epochs=st.number_input("ANFIS epochs",1,5000,200); anfis_goal=st.number_input("ANFIS error goal",0.,1e6,0.); anfis_step=st.number_input("ANFIS initial step size",1e-6,1.,.01,format="%.6f"); anfis_decay=st.number_input("ANFIS step decrease rate",1.,10.,1.1,.05); switch("ANFIS")
@@ -439,7 +510,7 @@ with tab1:
         cgf_iter=st.number_input("CGF iterations",1,5000,500); cgf_step=st.number_input("CGF initial step",1e-5,2.0,0.1,format="%.5f"); switch("CGF-ANN")
         cgf_sweep=st.checkbox("CGF-ANN hidden-neuron sweep (Nh=2–30)",value=False,key="cgf_nh_sweep")
         switch("ANFIS-MPA"); switch("ANFIS-OOA")
-        elm_hidden=st.number_input("ELM hidden neurons",5,1000,50); elm_alpha=st.number_input("ELM regularization",1e-10,100.,1e-6,format="%.8f"); elm_activation=st.selectbox("ELM activation",["tanh","relu","sigmoid"]); switch("ANFIS-ELM")
+        anfis_elm_hidden=st.number_input("ANFIS-ELM residual hidden neurons",5,1000,50); anfis_elm_alpha=st.number_input("ANFIS-ELM residual regularization",1e-10,100.,1e-6,format="%.8f"); anfis_elm_activation=st.selectbox("ANFIS-ELM residual activation",["tanh","relu","sigmoid"]); switch("ANFIS-ELM")
     with right:
         st.markdown('<div class="section-title">UPLOAD / CONFIGURATION</div>',unsafe_allow_html=True)
         if split_mode=="Auto Split":
@@ -467,9 +538,16 @@ with tab1:
             effective_n=int(ann_input) if ann_input>0 else n_in
             if effective_n!=n_in and any(m in selected_models for m in ["PSO-ANN","GA-ANN","GWO-ANN","MPA-ANN","OOA-ANN"]): st.error(f"ANN input neurons override is {effective_n}, but the dataset has {n_in} predictors. Set override to 0 (auto) or exactly {n_in}."); st.stop()
             if any(m in selected_models for m in ["ANFIS","ANFIS-MPA","ANFIS-OOA","ANFIS-ELM"]) and anfis_clusters>len(X_train): st.error("ANFIS clusters cannot exceed the number of training samples."); st.stop()
-            params={"Ridge":ridge_alpha,"Lasso":(lasso_alpha,lasso_iter),"EN":(en_alpha,en_l1,en_iter),"DTR":(tree_depth,tree_leaf,tree_split),"ABR":(ada_n,ada_lr,ada_loss),"GBR":(gb_n,gb_lr,gb_depth,gb_subsample),"HGBR":(hgb_lr,hgb_depth,hgb_iter,hgb_leaf),"RFR":(rf_n,rf_depth,rf_leaf),"ETR":(et_n,et_depth,et_leaf),"BGR":(bag_n,bag_samples,bag_features),"SVR":(svr_kernel,svr_c,svr_epsilon,svr_degree),"KNN":(knn_k,knn_weights,knn_p),"MLP":(mlp_l1,mlp_l2,mlp_activation,mlp_alpha,mlp_iter)}
+            params={"Ridge":ridge_alpha,"Lasso":(lasso_alpha,lasso_iter),"EN":(en_alpha,en_l1,en_iter),"DTR":(tree_depth,tree_leaf,tree_split),"ABR":(ada_n,ada_lr,ada_loss),"GBR":(gb_n,gb_lr,gb_depth,gb_subsample),"HGBR":(hgb_lr,hgb_depth,hgb_iter,hgb_leaf),"RFR":(rf_n,rf_depth,rf_leaf),"ETR":(et_n,et_depth,et_leaf),"BGR":(bag_n,bag_samples,bag_features),"SVR":(svr_kernel,svr_c,svr_epsilon,svr_degree),"KNN":(knn_k,knn_weights,knn_p),"MLP":(mlp_l1,mlp_l2,mlp_activation,mlp_alpha,mlp_iter),"ELM":(elm_hidden,elm_activation,elm_alpha)}
             if XGB_AVAILABLE: params["XGB"]=(xgb_n,xgb_depth,xgb_lr,xgb_alpha,xgb_subsample,xgb_colsample)
-            all_models=make_models(params,int(seed)); results=[]; fitted={}; prediction_data={}; convergence_data={}; progress=st.progress(0); status=st.empty()
+            all_models=make_models(params,int(seed)); results=[]; fitted={}; prediction_data={}; convergence_data={}; base_actual_pred=[]; best_hyperparams=None; progress=st.progress(0); status=st.empty()
+            if auto_tune_16:
+                st.info("Auto-tuning the 16 base regressors on a validation split of the training data. Final reported TR/TS metrics use the selected hyperparameters retrained on the full training set.")
+                tune_bar=st.progress(0)
+                best_specs,best_hyperparams=tune_16_base_models(X_train,y_train,int(seed),progress_cb=lambda v:tune_bar.progress(min(1.0,max(0.0,float(v)))))
+                for code,spec in best_specs.items():
+                    if code in all_models: all_models[code]=_make_base_from_spec(code,spec,int(seed))
+                st.session_state.best_hyperparams=best_hyperparams
             hybrid_cfg={"ANFIS":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),seed=int(seed)),"PSO-ANN":dict(hidden=int(ann_h),swarm=int(pso_swarm),iterations=int(pso_iter),c1=float(pso_c1),c2=float(pso_c2),inertia=float(pso_inertia),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"GA-ANN":dict(hidden=int(ann_h),population=int(ga_pop),generations=int(ga_gen),crossover=float(ga_cross),mutation=float(ga_mut),elite=int(ga_elite),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"GWO-ANN":dict(hidden=int(ann_h),wolves=int(gwo_wolves),iterations=int(gwo_iter),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"MPA-ANN":dict(hidden=int(ann_h),population=int(mpa_pop),iterations=int(mpa_iter),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"OOA-ANN":dict(hidden=int(ann_h),population=int(ooa_pop),iterations=int(ooa_iter),lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"CGF-ANN":dict(hidden=int(ann_h),iterations=int(cgf_iter),step=float(cgf_step),error_goal=0.0,lower=float(ann_low),upper=float(ann_high),seed=int(seed)),"ANFIS-MPA":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),population=int(mpa_pop),iterations=int(mpa_iter),seed=int(seed)),"ANFIS-OOA":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),population=int(ooa_pop),iterations=int(ooa_iter),seed=int(seed)),"ANFIS-ELM":dict(n_clusters=int(anfis_clusters),m=float(anfis_m),fcm_iterations=int(anfis_fcm_iter),threshold=float(anfis_thresh),epochs=int(anfis_epochs),error_goal=float(anfis_goal),step_size=float(anfis_step),step_decrease=float(anfis_decay),elm_hidden=int(elm_hidden),elm_alpha=float(elm_alpha),elm_activation=elm_activation,seed=int(seed))}
             for i,name in enumerate(selected_models,1):
                 status.info(f"Training {name} — {MODEL_NAMES[name]}"); start=time.time()
@@ -480,10 +558,13 @@ with tab1:
                     else:
                         model=all_models[name]; model.fit(X_train,y_train); ptr=model.predict(X_train); pte=model.predict(X_test); extra={}
                     elapsed=time.time()-start; results.append(metric_row(name,y_train,ptr,y_test,pte,elapsed,extra)); fitted[name]=model; prediction_data[name]=pd.DataFrame({"Observed":y_test,"Predicted":pte,"Residual":y_test-pte})
+                    if name in ["LR","Ridge","Lasso","EN","DTR","ABR","GBR","HGBR","RFR","ETR","BGR","SVR","KNN","XGB","MLP","ELM"]:
+                        base_actual_pred.extend([{"Model":name,"Dataset":"TR","Sample":j+1,"Actual":float(a),"Predicted":float(b),"Residual":float(a-b)} for j,(a,b) in enumerate(zip(y_train,ptr))])
+                        base_actual_pred.extend([{"Model":name,"Dataset":"TS","Sample":j+1,"Actual":float(a),"Predicted":float(b),"Residual":float(a-b)} for j,(a,b) in enumerate(zip(y_test,pte))])
                 except Exception as e:
                     results.append({"Model":name,"R2_Train":np.nan,"RMSE_Train":np.nan,"MAE_Train":np.nan,"R2_Test":np.nan,"RMSE_Test":np.nan,"MAE_Test":np.nan,"Time_s":time.time()-start,"Error":str(e)})
                 progress.progress(i/max(1,len(selected_models)))
-            results_df=pd.DataFrame(results).sort_values("R2_Test",ascending=False,na_position="last").reset_index(drop=True); st.session_state.results=results_df; st.session_state.trained_models=fitted; st.session_state.predictions=prediction_data; st.session_state.convergence=convergence_data; st.session_state.model_config={"ann_hidden":int(ann_h),"n_inputs":n_in,"anfis":hybrid_cfg["ANFIS"],"pso":hybrid_cfg["PSO-ANN"],"ga":hybrid_cfg["GA-ANN"],"gwo":hybrid_cfg["GWO-ANN"],"mpa":hybrid_cfg["MPA-ANN"],"ooa":hybrid_cfg["OOA-ANN"],"cgf":hybrid_cfg["CGF-ANN"]}; status.success("Training completed successfully."); st.dataframe(results_df,use_container_width=True)
+            results_df=pd.DataFrame(results).sort_values("R2_Test",ascending=False,na_position="last").reset_index(drop=True); st.session_state.results=results_df; st.session_state.trained_models=fitted; st.session_state.predictions=prediction_data; st.session_state.convergence=convergence_data; st.session_state.base_actual_predicted=pd.DataFrame(base_actual_pred); st.session_state.model_config={"ann_hidden":int(ann_h),"n_inputs":n_in,"anfis":hybrid_cfg["ANFIS"],"pso":hybrid_cfg["PSO-ANN"],"ga":hybrid_cfg["GA-ANN"],"gwo":hybrid_cfg["GWO-ANN"],"mpa":hybrid_cfg["MPA-ANN"],"ooa":hybrid_cfg["OOA-ANN"],"cgf":hybrid_cfg["CGF-ANN"]}; status.success("Training completed successfully."); st.dataframe(results_df,use_container_width=True)
 
 # CGF-ANN Nh=2–30 research sweep (independent of the normal model run).
 if cgf_sweep:
@@ -635,6 +716,12 @@ with tab2:
             testing_cols=[c for c in results.columns if c in ["Model","R2_Test","RMSE_Test","MAE_Test","Time_s","Configuration","Error"]]
             st.subheader("Testing Result")
             st.dataframe(results[testing_cols],use_container_width=True)
+            if "best_hyperparams" in st.session_state and st.session_state.best_hyperparams is not None:
+                st.subheader("Best Hyperparameters — 16 Base Models")
+                st.dataframe(st.session_state.best_hyperparams,use_container_width=True)
+            if "base_actual_predicted" in st.session_state and not st.session_state.base_actual_predicted.empty:
+                st.subheader("Actual vs Predicted — 16 Base Models")
+                st.dataframe(st.session_state.base_actual_predicted,use_container_width=True,height=350)
             st.subheader("Observed vs Predicted")
             if st.session_state.trained_models:
                 sm=st.selectbox("Select Model",list(st.session_state.trained_models.keys()))
@@ -676,6 +763,10 @@ with tab2:
                         for itv in (500,1000):
                             q=mo_export[(mo_export["Architecture"]==arch)&(mo_export["Model"]==alg)&(mo_export["Iterations"]==itv)].sort_values("Population")
                             q.to_excel(w,index=False,sheet_name=f"{alg.replace('-','_')}_{arch}_{itv}"[:31])
+            if "best_hyperparams" in st.session_state and st.session_state.best_hyperparams is not None:
+                st.session_state.best_hyperparams.to_excel(w,index=False,sheet_name="Best_Hyperparameters_16")
+            if "base_actual_predicted" in st.session_state and not st.session_state.base_actual_predicted.empty:
+                st.session_state.base_actual_predicted.to_excel(w,index=False,sheet_name="Actual_Predicted_16")
             for mn,pd_ in st.session_state.predictions.items(): pd_.to_excel(w,index=False,sheet_name=f"{mn}_Pred"[:31])
         st.download_button("⬇ DOWNLOAD MODEL_RESULTS.XLSX",buf.getvalue(),"MLRweb_Model_Results.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
