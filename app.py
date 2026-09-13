@@ -260,6 +260,37 @@ def cgf_ann_nh_sweep(X_train, y_train, X_test, y_test, base_cfg, nh_values=range
     return pd.DataFrame(rows), histories
 
 
+
+def mpa_ooa_population_sweep(X_train, y_train, X_test, y_test, base_cfg, architectures=((8,17,1),(8,27,1)), populations=range(10,101,10), iterations_list=(500,1000), algorithms=("MPA","OOA")):
+    """Research sweep matching the manuscript-style population/iteration table.
+    Runs ANN-MPA and ANN-OOA for architectures 8-17-1 and 8-27-1,
+    population sizes 10..100, at 500 and 1000 iterations.
+    """
+    if X_train.shape[1] != 8:
+        raise ValueError(f"This analysis requires exactly 8 input parameters; the dataset has {X_train.shape[1]} predictors.")
+    rows=[]; histories={}
+    for arch in architectures:
+        n_in, nh, n_out = arch
+        if n_out != 1:
+            raise ValueError("Only single-output ANN architectures are supported.")
+        for algorithm in algorithms:
+            for iterations in iterations_list:
+                for population in populations:
+                    cfg=dict(base_cfg); cfg.update(hidden=int(nh), population=int(population), iterations=int(iterations))
+                    # Deterministic but distinct seed for every experiment.
+                    cfg["seed"]=int(base_cfg.get("seed",1))+nh*100000+population*100+iterations+(0 if algorithm=="MPA" else 5000000)
+                    weights,hist = optimized_ann_fit(algorithm,X_train,y_train,cfg)
+                    ptr=ann_predict(weights,X_train,n_in,nh); pte=ann_predict(weights,X_test,n_in,nh)
+                    key=f"{algorithm}_{n_in}-{nh}-{n_out}_{iterations}_{population}"
+                    rows.append({
+                        "Architecture":f"{n_in}-{nh}-{n_out}","Model":f"ANN-{algorithm}",
+                        "Population":int(population),"Iterations":int(iterations),
+                        "R2_Train":float(r2_score(y_train,ptr)),"RMSE_Train":float(np.sqrt(mean_squared_error(y_train,ptr))),"MAE_Train":float(mean_absolute_error(y_train,ptr)),
+                        "R2_Test":float(r2_score(y_test,pte)),"RMSE_Test":float(np.sqrt(mean_squared_error(y_test,pte))),"MAE_Test":float(mean_absolute_error(y_test,pte))
+                    })
+                    histories[key]=hist
+    return pd.DataFrame(rows), histories
+
 def initialize_ann_population(size,n_in,n_hidden,rng,low,high):
     dim=n_in*n_hidden+2*n_hidden+1
     return rng.uniform(low,high,(size,dim))
@@ -489,6 +520,74 @@ if cgf_sweep:
             for nh,hdf in st.session_state.get("cgf_sweep_history",{}).items(): hdf.to_excel(sw,index=False,sheet_name=f"CGF_Nh_{nh}_Conv")
         st.download_button("⬇ DOWNLOAD CGF Nh=2–30 EXCEL",sbuf.getvalue(),"CGF-ANN_Nh_2-30_Results.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",key="download_cgf_sweep")
 
+
+# ANN-MPA / ANN-OOA population and iteration analysis for 8-17-1 and 8-27-1.
+st.markdown("### ANN-MPA / ANN-OOA Population–Iteration Analysis")
+st.caption("Runs architectures 8-17-1 and 8-27-1 for population sizes 10–100 at 500 and 1000 iterations. Results are exported to Excel.")
+run_mpa_ooa_sweep=st.button("▶ RUN ANN-MPA + ANN-OOA POPULATION ANALYSIS",type="secondary",use_container_width=True,key="run_mpa_ooa_sweep")
+if run_mpa_ooa_sweep:
+    if split_mode=="Auto Split":
+        if uploaded_file is None:
+            st.error("Please upload an Excel (.xlsx) file before running the MPA/OOA analysis."); st.stop()
+        df_mo=read_excel_sheet(uploaded_file,sheet_name)
+        Xm=df_mo.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; ym=pd.to_numeric(df_mo.iloc[:,-1],errors="coerce").values
+        valid_m=np.isfinite(Xm).all(axis=1)&np.isfinite(ym); Xm=Xm[valid_m]; ym=ym[valid_m]
+        Xtr_m,Xte_m,ytr_m,yte_m=train_test_split(Xm,ym,test_size=test_percent/100,random_state=int(seed),shuffle=shuffle=="Yes")
+    else:
+        if train_file is None or test_file is None:
+            st.error("Upload both training and testing Excel files before running the MPA/OOA analysis."); st.stop()
+        tr_m=read_excel_sheet(train_file,train_sheet); te_m=read_excel_sheet(test_file,test_sheet)
+        Xtr_m=tr_m.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; ytr_m=pd.to_numeric(tr_m.iloc[:,-1],errors="coerce").values
+        Xte_m=te_m.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; yte_m=pd.to_numeric(te_m.iloc[:,-1],errors="coerce").values
+    if Xtr_m.shape[1] != 8:
+        st.error(f"The requested architectures 8-17-1 and 8-27-1 require exactly 8 input parameters. Your dataset has {Xtr_m.shape[1]} predictors.")
+    else:
+        scaler_cls_m={"StandardScaler":StandardScaler,"MinMaxScaler":MinMaxScaler,"RobustScaler":RobustScaler,"None":None}[scaler_name]
+        if scaler_cls_m is not None:
+            sc_m=scaler_cls_m(); Xtr_m=sc_m.fit_transform(Xtr_m); Xte_m=sc_m.transform(Xte_m)
+        base_m={"hidden":17,"population":10,"iterations":500,"lower":float(ann_low),"upper":float(ann_high),"seed":int(seed)}
+        total=2*2*10
+        prog_m=st.progress(0); status_m=st.empty(); counter=0
+        # Run each experiment with live progress.
+        rows_m=[]; hist_m={}
+        for arch in ((8,17,1),(8,27,1)):
+            for algorithm in ("MPA","OOA"):
+                for iterations in (500,1000):
+                    for population in range(10,101,10):
+                        counter+=1; status_m.info(f"Running ANN-{algorithm} {arch[0]}-{arch[1]}-{arch[2]} | population={population} | iterations={iterations} ({counter}/{total})")
+                        cfg=dict(base_m); cfg.update(hidden=arch[1],population=population,iterations=iterations)
+                        cfg["seed"]=int(seed)+arch[1]*100000+population*100+iterations+(0 if algorithm=="MPA" else 5000000)
+                        weights,hist=optimized_ann_fit(algorithm,Xtr_m,ytr_m,cfg)
+                        ptr=ann_predict(weights,Xtr_m,8,arch[1]); pte=ann_predict(weights,Xte_m,8,arch[1])
+                        rows_m.append({"Architecture":f"8-{arch[1]}-1","Model":f"ANN-{algorithm}","Population":population,"Iterations":iterations,"R2_Train":float(r2_score(ytr_m,ptr)),"RMSE_Train":float(np.sqrt(mean_squared_error(ytr_m,ptr))),"MAE_Train":float(mean_absolute_error(ytr_m,ptr)),"R2_Test":float(r2_score(yte_m,pte)),"RMSE_Test":float(np.sqrt(mean_squared_error(yte_m,pte))),"MAE_Test":float(mean_absolute_error(yte_m,pte))})
+                        hist_m[f"{algorithm}_8-{arch[1]}-1_{iterations}_{population}"]=hist
+                        prog_m.progress(counter/total)
+        mo_df=pd.DataFrame(rows_m)
+        st.session_state.mpa_ooa_sweep_results=mo_df; st.session_state.mpa_ooa_sweep_history=hist_m
+        status_m.success("ANN-MPA / ANN-OOA population analysis completed.")
+
+if "mpa_ooa_sweep_results" in st.session_state:
+    mo_df=st.session_state.mpa_ooa_sweep_results
+    st.subheader("Population analysis results")
+    st.dataframe(mo_df,use_container_width=True)
+    st.markdown("#### R² versus population")
+    for arch in ("8-17-1","8-27-1"):
+        for alg in ("ANN-MPA","ANN-OOA"):
+            for itv in (500,1000):
+                q=mo_df[(mo_df["Architecture"]==arch)&(mo_df["Model"]==alg)&(mo_df["Iterations"]==itv)].sort_values("Population")
+                if not q.empty:
+                    st.markdown(f"**{alg} — {arch} — {itv} iterations**")
+                    st.line_chart(q.set_index("Population")[["R2_Train","R2_Test"]])
+    xbuf=io.BytesIO()
+    with pd.ExcelWriter(xbuf,engine="openpyxl") as xw:
+        mo_df.to_excel(xw,index=False,sheet_name="All_Results")
+        for arch in ("8-17-1","8-27-1"):
+            for alg in ("ANN-MPA","ANN-OOA"):
+                for itv in (500,1000):
+                    q=mo_df[(mo_df["Architecture"]==arch)&(mo_df["Model"]==alg)&(mo_df["Iterations"]==itv)].sort_values("Population")
+                    q.to_excel(xw,index=False,sheet_name=f"{alg.replace('-','_')}_{arch}_{itv}"[:31])
+    st.download_button("⬇ DOWNLOAD ANN-MPA + ANN-OOA POPULATION EXCEL",xbuf.getvalue(),"ANN_MPA_OOA_8-17-1_8-27-1_Population_Results.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",key="download_mpa_ooa_population")
+
 with tab2:
     st.markdown('<div class="section-title">RESULTS & ANALYSIS</div>',unsafe_allow_html=True); results=st.session_state.results
     if results is None: st.info("Run Training from the Workbench tab first.")
@@ -534,6 +633,14 @@ with tab2:
             for mn,hdf in st.session_state.get("convergence",{}).items(): hdf.to_excel(w,index=False,sheet_name=f"{mn}_Convergence"[:31])
             if "cgf_sweep_results" in st.session_state:
                 st.session_state.cgf_sweep_results.to_excel(w,index=False,sheet_name="CGF-ANN_Nh_2-30")
+            if "mpa_ooa_sweep_results" in st.session_state:
+                mo_export=st.session_state.mpa_ooa_sweep_results.copy()
+                mo_export.to_excel(w,index=False,sheet_name="MPA_OOA_Pop_All")
+                for arch in ("8-17-1","8-27-1"):
+                    for alg in ("ANN-MPA","ANN-OOA"):
+                        for itv in (500,1000):
+                            q=mo_export[(mo_export["Architecture"]==arch)&(mo_export["Model"]==alg)&(mo_export["Iterations"]==itv)].sort_values("Population")
+                            q.to_excel(w,index=False,sheet_name=f"{alg.replace('-','_')}_{arch}_{itv}"[:31])
             for mn,pd_ in st.session_state.predictions.items(): pd_.to_excel(w,index=False,sheet_name=f"{mn}_Pred"[:31])
         st.download_button("⬇ DOWNLOAD MODEL_RESULTS.XLSX",buf.getvalue(),"MLRweb_Model_Results.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
