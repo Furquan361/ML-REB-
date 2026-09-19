@@ -165,8 +165,10 @@ def mpa_optimize(objective, dim, pop_size, iterations, lower, upper, seed=1):
             U=rng.random((pop_size,dim))<0.2; prey=np.clip(prey+CF*(lo+rng.random((pop_size,dim))*(hi-lo))*U,lo,hi)
         else:
             r=rng.random(); prey=np.clip(prey+((0.2*(1-r)+r))*(prey[rng.permutation(pop_size)]-prey[rng.permutation(pop_size)]),lo,hi)
-        history.append(float(np.sqrt(best_fit)))
-    return best,pd.DataFrame({"Iteration":np.arange(1,iterations+1),"RMSE":history})
+        history.append(float(best_fit))
+    hdf=pd.DataFrame({"Iteration":np.arange(1,iterations+1),"MSE":history})
+    hdf["RMSE"]=np.sqrt(np.maximum(hdf["MSE"].values,0.0))
+    return best,hdf
 
 def ooa_optimize(objective, dim, pop_size, iterations, lower, upper, seed=1):
     rng=np.random.default_rng(seed); lo=float(lower); hi=float(upper)
@@ -188,8 +190,10 @@ def ooa_optimize(objective, dim, pop_size, iterations, lower, upper, seed=1):
             elif f2 < fit[i]: new[i]=candidate2
         X=new; fit=np.array([objective(x) for x in X]); j=np.argmin(fit)
         if fit[j]<best_fit: best=X[j].copy(); best_fit=float(fit[j])
-        history.append(float(np.sqrt(best_fit)))
-    return best,pd.DataFrame({"Iteration":np.arange(1,iterations+1),"RMSE":history})
+        history.append(float(best_fit))
+    hdf=pd.DataFrame({"Iteration":np.arange(1,iterations+1),"MSE":history})
+    hdf["RMSE"]=np.sqrt(np.maximum(hdf["MSE"].values,0.0))
+    return best,hdf
 
 def optimized_ann_fit(algorithm,X,y,p):
     n_in=X.shape[1]; h=p["hidden"]; dim=n_in*h+2*h+1
@@ -681,6 +685,92 @@ if cgf_sweep:
         st.download_button("⬇ DOWNLOAD CGF Nh=2–30 EXCEL",sbuf.getvalue(),"CGF-ANN_Nh_2-30_Results.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",key="download_cgf_sweep")
 
 
+def make_mpa_convergence_figure(history_dict, architecture, iterations, zoom_start=None, zoom_end=None):
+    """Create a publication-style ANN-MPA convergence figure with one curve per population.
+    The plotted objective is the best MSE found by MPA at each iteration.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import ConnectionPatch
+
+    fig, ax = plt.subplots(figsize=(8.0, 5.4), dpi=180)
+    plt.rcParams["font.family"] = "Times New Roman"
+    plt.rcParams["axes.grid"] = False
+    for pop in sorted(history_dict):
+        hdf = history_dict[pop]
+        ax.plot(hdf["Iteration"], hdf["MSE"], linewidth=1.6, label=f"POP = {pop}")
+    ax.set_xlabel("Iterations", fontsize=13)
+    ax.set_ylabel("MSE", fontsize=13)
+    ax.set_title(f"ANN-MPA Convergence — {architecture} — {iterations} Iterations", fontsize=13)
+    ax.tick_params(labelsize=11)
+    ax.grid(False)
+    ax.legend(loc="upper right", fontsize=9, frameon=True, ncol=2)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.9)
+
+    if zoom_start is None:
+        zoom_start = max(1, int(iterations * 0.60))
+    if zoom_end is None:
+        zoom_end = min(iterations, max(zoom_start + 10, int(iterations * 0.75)))
+    zoom_start = max(1, int(zoom_start)); zoom_end = min(iterations, int(zoom_end))
+    if zoom_end > zoom_start:
+        inset = ax.inset_axes([0.49, 0.47, 0.45, 0.38])
+        vals=[]
+        for pop in sorted(history_dict):
+            hdf=history_dict[pop]
+            q=hdf[(hdf["Iteration"]>=zoom_start)&(hdf["Iteration"]<=zoom_end)]
+            if not q.empty:
+                vals.extend(q["MSE"].tolist())
+                inset.plot(q["Iteration"],q["MSE"],linewidth=1.2)
+        inset.set_xlim(zoom_start,zoom_end)
+        if vals:
+            lo=min(vals); hi=max(vals); pad=max((hi-lo)*0.12,1e-12)
+            inset.set_ylim(max(0,lo-pad),hi+pad)
+        inset.set_xlabel("Iterations",fontsize=8)
+        inset.set_ylabel("MSE",fontsize=8)
+        inset.tick_params(labelsize=7)
+        inset.grid(False)
+        for spine in inset.spines.values(): spine.set_linewidth(0.7)
+        # Connect the zoomed region to the inset without imposing a color scheme.
+        try:
+            ax.indicate_inset_zoom(inset, edgecolor="black", alpha=0.65)
+        except Exception:
+            pass
+    fig.tight_layout()
+    out=io.BytesIO()
+    fig.savefig(out,format="png",dpi=600,bbox_inches="tight",facecolor="white")
+    out.seek(0)
+    plt.close(fig)
+    return out.getvalue()
+
+
+def run_ann_mpa_convergence_analysis(Xtr, ytr, Xte, yte, base_cfg, populations, iterations_list, architectures, seed, progress_cb=None):
+    """Run ANN-MPA convergence analysis and retain iteration-by-iteration MSE.
+    This is intentionally separate from the ANN-MPA/OOA population sweep so the
+    manuscript convergence figures use MPA's actual objective history.
+    """
+    if Xtr.shape[1] != 8:
+        raise ValueError(f"ANN-MPA convergence analysis requires exactly 8 predictors; found {Xtr.shape[1]}.")
+    rows=[]; histories={}; predictions=[]
+    total=len(architectures)*len(iterations_list)*len(populations); counter=0
+    for arch in architectures:
+        n_in,nh,n_out=arch
+        if (n_in,n_out)!=(8,1): raise ValueError("Only 8-Nh-1 architectures are supported.")
+        for iterations in iterations_list:
+            for population in populations:
+                counter += 1
+                if progress_cb: progress_cb(counter,total,arch,iterations,population)
+                cfg=dict(base_cfg); cfg.update(hidden=int(nh),population=int(population),iterations=int(iterations),seed=int(seed)+nh*100000+population*100+iterations)
+                weights,hist=optimized_ann_fit("MPA",Xtr,ytr,cfg)
+                ptr=ann_predict(weights,Xtr,8,nh); pte=ann_predict(weights,Xte,8,nh)
+                key=f"8-{nh}-1_{iterations}_POP_{population}"
+                histories[key]=hist.copy()
+                rows.append({"Architecture":f"8-{nh}-1","Model":"ANN-MPA","Population":int(population),"Iterations":int(iterations),"Best_MSE":float(hist["MSE"].iloc[-1]),"Best_RMSE":float(hist["RMSE"].iloc[-1]),"R2_Train":float(r2_score(ytr,ptr)),"RMSE_Train":float(np.sqrt(mean_squared_error(ytr,ptr))),"MAE_Train":float(mean_absolute_error(ytr,ptr)),"R2_Test":float(r2_score(yte,pte)),"RMSE_Test":float(np.sqrt(mean_squared_error(yte,pte))),"MAE_Test":float(mean_absolute_error(yte,pte))})
+                for phase,actuals,preds in (("TR",ytr,ptr),("TS",yte,pte)):
+                    for idx,(actual,pred) in enumerate(zip(actuals,preds),start=1):
+                        predictions.append({"Architecture":f"8-{nh}-1","Model":"ANN-MPA","Population":int(population),"Iterations":int(iterations),"Dataset":phase,"Sample":idx,"Actual":float(actual),"Predicted":float(pred),"Residual":float(actual-pred)})
+    return pd.DataFrame(rows),histories,pd.DataFrame(predictions)
+
+
 # ANN-MPA / ANN-OOA population and iteration analysis for 8-17-1 and 8-26-1.
 st.markdown("### ANN-MPA / ANN-OOA Population–Iteration Analysis")
 st.caption("Runs architectures 8-17-1 and 8-26-1 for population sizes 10–100 at 500 and 1000 iterations. Results are exported to Excel.")
@@ -764,6 +854,84 @@ if "mpa_ooa_sweep_results" in st.session_state:
                     q.to_excel(xw,index=False,sheet_name=f"{alg.replace('-','_')}_{arch}_{itv}"[:31])
     st.download_button("⬇ DOWNLOAD ANN-MPA + ANN-OOA POPULATION EXCEL",xbuf.getvalue(),"ANN_MPA_OOA_8-17-1_8-26-1_Population_Results.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",key="download_mpa_ooa_population")
 
+# Dedicated manuscript-style ANN-MPA convergence analysis.
+st.markdown("### ANN-MPA Convergence Analysis — Publication Figure")
+st.caption("Generates the actual best-MSE history recorded at every MPA iteration for POP = 5, 10, …, 50, using 8-17-1 and 8-26-1 ANN architectures at 500 and 1000 iterations.")
+c1,c2,c3=st.columns(3)
+with c1:
+    mpa_conv_arch=st.multiselect("ANN architectures",["8-17-1","8-26-1"],default=["8-17-1","8-26-1"],key="mpa_conv_arch")
+with c2:
+    mpa_conv_iters=st.multiselect("Iterations",[500,1000],default=[500,1000],key="mpa_conv_iters")
+with c3:
+    mpa_conv_pops=st.multiselect("Population sizes",list(range(5,51,5)),default=list(range(5,51,5)),key="mpa_conv_pops")
+zc1,zc2=st.columns(2)
+with zc1:
+    mpa_zoom_start=st.number_input("Zoom start iteration",min_value=1,max_value=1000,value=320,step=10,key="mpa_zoom_start")
+with zc2:
+    mpa_zoom_end=st.number_input("Zoom end iteration",min_value=2,max_value=1000,value=380,step=10,key="mpa_zoom_end")
+run_mpa_conv=st.button("▶ RUN ANN-MPA CONVERGENCE ANALYSIS",type="primary",use_container_width=True,key="run_mpa_conv")
+if run_mpa_conv:
+    if not mpa_conv_arch or not mpa_conv_iters or not mpa_conv_pops:
+        st.error("Select at least one architecture, iteration setting, and population size."); st.stop()
+    if mpa_zoom_end <= mpa_zoom_start:
+        st.error("Zoom end iteration must be greater than zoom start iteration."); st.stop()
+    if split_mode=="Auto Split":
+        if uploaded_file is None:
+            st.error("Please upload an Excel (.xlsx) file before running ANN-MPA convergence analysis."); st.stop()
+        df_mc=read_excel_sheet(uploaded_file,sheet_name)
+        Xmc=df_mc.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; ymc=pd.to_numeric(df_mc.iloc[:,-1],errors="coerce").values
+        valid_mc=np.isfinite(Xmc).all(axis=1)&np.isfinite(ymc); Xmc=Xmc[valid_mc]; ymc=ymc[valid_mc]
+        Xtr_mc,Xte_mc,ytr_mc,yte_mc=train_test_split(Xmc,ymc,test_size=test_percent/100,random_state=int(seed),shuffle=shuffle=="Yes")
+    else:
+        if train_file is None or test_file is None:
+            st.error("Upload both training and testing Excel files before running ANN-MPA convergence analysis."); st.stop()
+        tr_mc=read_excel_sheet(train_file,train_sheet); te_mc=read_excel_sheet(test_file,test_sheet)
+        Xtr_mc=tr_mc.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; ytr_mc=pd.to_numeric(tr_mc.iloc[:,-1],errors="coerce").values
+        Xte_mc=te_mc.iloc[:,:-1].apply(pd.to_numeric,errors="coerce").values; yte_mc=pd.to_numeric(te_mc.iloc[:,-1],errors="coerce").values
+    if Xtr_mc.shape[1] != 8:
+        st.error(f"ANN-MPA convergence analysis requires exactly 8 predictors because the requested architectures are 8-17-1 and 8-26-1. Your dataset has {Xtr_mc.shape[1]} predictors.")
+    else:
+        scaler_cls_mc={"StandardScaler":StandardScaler,"MinMaxScaler":MinMaxScaler,"RobustScaler":RobustScaler,"None":None}[scaler_name]
+        if scaler_cls_mc is not None:
+            sc_mc=scaler_cls_mc(); Xtr_mc=sc_mc.fit_transform(Xtr_mc); Xte_mc=sc_mc.transform(Xte_mc)
+        base_mc={"hidden":17,"population":10,"iterations":500,"lower":float(ann_low),"upper":float(ann_high),"seed":int(seed)}
+        archs_mc=[tuple([8,int(a.split("-")[1]),1]) for a in mpa_conv_arch]
+        prog_mc=st.progress(0); status_mc=st.empty()
+        def _mc_progress(done,total,arch,itv,pop):
+            prog_mc.progress(done/total); status_mc.info(f"ANN-MPA convergence: {arch[0]}-{arch[1]}-{arch[2]} | POP={pop} | Iterations={itv} ({done}/{total})")
+        rows_mc,hist_mc,pred_mc=run_ann_mpa_convergence_analysis(Xtr_mc,ytr_mc,Xte_mc,yte_mc,base_mc,mpa_conv_pops,mpa_conv_iters,archs_mc,int(seed),_mc_progress)
+        st.session_state.mpa_convergence_results=rows_mc
+        st.session_state.mpa_convergence_history=hist_mc
+        st.session_state.mpa_convergence_predictions=pred_mc
+        figs_mc={}
+        for arch in mpa_conv_arch:
+            for itv in mpa_conv_iters:
+                subset={int(k.split("_POP_")[1]):v for k,v in hist_mc.items() if k.startswith(f"{arch}_{itv}_POP_")}
+                if subset:
+                    zstart=min(int(mpa_zoom_start),max(1,int(itv)-1)); zend=min(int(mpa_zoom_end),int(itv))
+                    figs_mc[f"{arch}_{itv}"]=make_mpa_convergence_figure(subset,arch,itv,zstart,zend)
+        st.session_state.mpa_convergence_figures=figs_mc
+        status_mc.success("ANN-MPA convergence analysis completed. The MSE values are the actual best objective values recorded during MPA optimization.")
+
+if "mpa_convergence_results" in st.session_state:
+    st.subheader("ANN-MPA Convergence Figures")
+    st.info("Each curve is the best MSE found by the MPA population at each iteration. No synthetic or manually fitted convergence values are used.")
+    figs=st.session_state.get("mpa_convergence_figures",{})
+    for key,img in figs.items():
+        st.markdown(f"**{key.replace('_',' — ')}**")
+        st.image(img,use_container_width=True)
+        st.download_button("⬇ DOWNLOAD 600-DPI PNG",img,f"ANN_MPA_{key}_Convergence.png","image/png",key=f"dl_mpa_fig_{key}")
+    st.markdown("#### Convergence MSE data")
+    # Build a tidy long-format convergence table.
+    conv_frames=[]
+    for key,hdf in st.session_state.get("mpa_convergence_history",{}).items():
+        prefix,pop_s=key.rsplit("_POP_",1); arch,itv=prefix.rsplit("_",1)
+        q=hdf.copy(); q.insert(0,"Population",int(pop_s)); q.insert(0,"Iterations",int(itv)); q.insert(0,"Architecture",arch); q.insert(1,"Model","ANN-MPA"); conv_frames.append(q)
+    mpa_conv_long=pd.concat(conv_frames,ignore_index=True) if conv_frames else pd.DataFrame()
+    st.dataframe(mpa_conv_long,use_container_width=True,height=350)
+    if not mpa_conv_long.empty:
+        st.download_button("⬇ DOWNLOAD ANN-MPA CONVERGENCE CSV",mpa_conv_long.to_csv(index=False),"ANN_MPA_Convergence_MSE.csv","text/csv",key="download_mpa_conv_csv")
+
 with tab2:
     st.markdown('<div class="section-title">RESULTS & ANALYSIS</div>',unsafe_allow_html=True); results=st.session_state.results
     if results is None: st.info("Run Training from the Workbench tab first.")
@@ -780,6 +948,16 @@ with tab2:
             testing_cols=[c for c in results.columns if c in ["Model","R2_Test","RMSE_Test","MAE_Test","Time_s","Configuration","Error"]]
             st.subheader("Testing Result")
             st.dataframe(results[testing_cols],use_container_width=True)
+            if "mpa_convergence_results" in st.session_state:
+                st.session_state.mpa_convergence_results.to_excel(w,index=False,sheet_name="ANN_MPA_Conv_Results")
+                conv_frames=[]
+                for key,hdf in st.session_state.get("mpa_convergence_history",{}).items():
+                    prefix,pop_s=key.rsplit("_POP_",1); arch,itv=prefix.rsplit("_",1)
+                    q=hdf.copy(); q.insert(0,"Population",int(pop_s)); q.insert(0,"Iterations",int(itv)); q.insert(0,"Architecture",arch); q.insert(1,"Model","ANN-MPA"); conv_frames.append(q)
+                if conv_frames:
+                    pd.concat(conv_frames,ignore_index=True).to_excel(w,index=False,sheet_name="ANN_MPA_Convergence")
+                if "mpa_convergence_predictions" in st.session_state:
+                    st.session_state.mpa_convergence_predictions.to_excel(w,index=False,sheet_name="ANN_MPA_Conv_Actual_Pred")
             if "best_hyperparams" in st.session_state and st.session_state.best_hyperparams is not None:
                 st.subheader("Best Hyperparameters — 16 Base Models")
                 st.dataframe(st.session_state.best_hyperparams,use_container_width=True)
@@ -802,7 +980,7 @@ with tab2:
             else:
                 cm=st.selectbox("Select optimization model",list(conv.keys()),key="conv_model")
                 hdf=conv[cm]
-                metric_options=["RMSE"] if cm in ["ANFIS","MPA-ANN","OOA-ANN","ANFIS-MPA","ANFIS-OOA"] else ["RMSE","MAE"]
+                metric_options=[m for m in ["MSE","RMSE"] if m in hdf.columns] if cm in ["ANFIS","MPA-ANN","OOA-ANN","ANFIS-MPA","ANFIS-OOA"] else ["RMSE","MAE"]
                 metric=st.radio("Plot metric",metric_options,horizontal=True,key="conv_metric")
                 st.line_chart(hdf.set_index("Iteration")[[metric]])
                 st.dataframe(hdf,use_container_width=True,height=300)
