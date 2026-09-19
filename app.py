@@ -856,14 +856,14 @@ if "mpa_ooa_sweep_results" in st.session_state:
 
 # Dedicated manuscript-style ANN-MPA convergence analysis.
 st.markdown("### ANN-MPA Convergence Analysis — Publication Figure")
-st.caption("Generates the actual best-MSE history recorded at every MPA iteration for POP = 5, 10, …, 50, using 8-17-1 and 8-26-1 ANN architectures at 500 and 1000 iterations.")
+st.caption("Generates the actual best-MSE history recorded at every MPA iteration for POP = 10, 20, 30, …, 100, using 8-17-1 and 8-26-1 ANN architectures at 500 and 1000 iterations.")
 c1,c2,c3=st.columns(3)
 with c1:
     mpa_conv_arch=st.multiselect("ANN architectures",["8-17-1","8-26-1"],default=["8-17-1","8-26-1"],key="mpa_conv_arch")
 with c2:
     mpa_conv_iters=st.multiselect("Iterations",[500,1000],default=[500,1000],key="mpa_conv_iters")
 with c3:
-    mpa_conv_pops=st.multiselect("Population sizes",list(range(5,51,5)),default=list(range(5,51,5)),key="mpa_conv_pops")
+    mpa_conv_pops=st.multiselect("Population sizes",list(range(10,101,10)),default=list(range(10,101,10)),key="mpa_conv_pops")
 zc1,zc2=st.columns(2)
 with zc1:
     mpa_zoom_start=st.number_input("Zoom start iteration",min_value=1,max_value=1000,value=320,step=10,key="mpa_zoom_start")
